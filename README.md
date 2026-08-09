@@ -14,6 +14,14 @@ A small local web app with two views, switched from the menu at the top:
   time. Click "+ Add 10-day chart to Search" on any card to pull it into
   the Search view with full 10-day detail.
 
+Both views also have a **📊 Check Result** button on every card: it shows
+the latest quarter's EPS estimate vs. actual, the surprise %, the
+pre-market/after-hours/regular-session price move, and a simple
+Bullish/Bearish/Mixed label based on those two facts. In the Earnings
+Calendar view there's also an **Auto-refresh** toggle that polls every 2
+minutes and flashes any open card the moment its result comes in — see
+"Assumptions / limitations" for what "immediate" actually means here.
+
 ## Requirements
 
 - [Node.js](https://nodejs.org) version 18 or newer (has built-in `fetch`,
@@ -51,6 +59,12 @@ PORT=8080 npm start
     calendar page for that date (see `earnings.js`), then fetches a
     current price for every ticker found and returns them all as JSON.
     Defaults to today if `date` is omitted.
+  - `GET /api/earnings-reaction/:ticker` → calls Yahoo's `quoteSummary`
+    endpoint (`earningsHistory` + `price` modules) to get the most recent
+    quarter's EPS estimate/actual/surprise plus pre-market, regular, and
+    after-hours price moves, and computes a Bullish/Bearish/Mixed/Neutral
+    label from EPS beat-or-miss combined with the relevant session's price
+    reaction.
 - `earnings.js` handles the earnings-calendar scraping specifically —
   Yahoo doesn't expose a clean JSON API for "who's reporting today", so
   this parses the calendar page's HTML with a scoped regular expression
@@ -131,6 +145,23 @@ full control:
   guaranteed uptime/SLA, since it's built on a free unofficial source.
   For anything beyond personal/local use, consider a licensed market-data
   API instead.
+- **"Check Result" / Bullish-Bearish label is not financial advice and not
+  guaranteed accurate.** It's a plain-English summary of two facts pulled
+  straight from Yahoo (did reported EPS beat or miss the estimate, and did
+  the price move up or down in the relevant session) — nothing more. Real
+  market reactions depend on guidance, revenue, sector sentiment, and much
+  else the label doesn't see, which is exactly why "Mixed" shows up often
+  (e.g. an EPS beat the market still sells off on). Use it as a quick
+  pointer to go look closer, not as a signal to act on.
+- **"Immediate" means polled, not pushed.** The Auto-refresh toggle checks
+  every 2 minutes while the tab stays open — there's no way to get true
+  instant/real-time push notifications from an unofficial, undocumented
+  data source like this without a much larger always-on backend
+  (and Yahoo would likely rate-limit or block that kind of polling
+  frequency anyway). Two minutes is a reasonable balance between "notice
+  it quickly" and "don't get blocked." You can lower
+  `AUTO_REFRESH_INTERVAL_MS` in `public/app.js` if you want to try polling
+  faster, at your own risk of hitting rate limits.
 - **Earnings Calendar view — pagination and volume caps.** Some single
   days have 400-600+ companies reporting earnings. Yahoo's calendar page
   only fully renders a first "page" of results server-side; the rest

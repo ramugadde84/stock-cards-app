@@ -10,6 +10,13 @@
  *      each with a "View 10-day chart" button that adds it to the Search
  *      view using the same loadTicker() logic.
  *
+ * Both views also have a "📊 Check Result" button per card, which calls
+ * /api/earnings-reaction/:ticker to show EPS estimate vs actual, the
+ * surprise %, the pre/post-market price move, and a simple Bullish/
+ * Bearish/Mixed label. The Earnings Calendar view additionally has an
+ * "Auto-refresh" toggle that polls every 2 minutes and flashes any card
+ * whose result just came in.
+ *
  * Previously searched tickers are remembered in the browser's localStorage
  * so they reload automatically next time you open the page (this is a
  * normal local web app running in your own browser, not a Claude artifact,
@@ -34,6 +41,15 @@ const loadEarningsBtn = document.getElementById('loadEarningsBtn');
 const quickDateBtns = document.querySelectorAll('.quick-date-btn');
 const earningsGrid = document.getElementById('earningsGrid');
 const earningsStatus = document.getElementById('earningsStatus');
+const autoRefreshToggle = document.getElementById('autoRefreshToggle');
+
+// Tickers whose "Check Result" panel is currently expanded in the Earnings
+// Calendar view — re-opened automatically after each reload/auto-refresh so
+// you don't lose your place. Paired with the last known hasReported value so
+// we can flash a card the moment a result flips from "not yet" to "reported."
+const openReactionTickers = new Set();
+const lastKnownReportedState = new Map(); // ticker -> boolean
+let autoRefreshTimer = null;
 
 // ============================================================================
 // Menu / view switching
@@ -187,10 +203,12 @@ function renderCard(card, data) {
         </table>
       </div>
     </details>
+    <div class="reaction-slot"></div>
     <div class="card-footer">${escapeHtml(data.exchange || '')}</div>
   `;
 
   attachRemove(card, data.ticker);
+  attachReactionButton(card, data.ticker, { autoTrack: false });
 }
 
 function attachRemove(card, ticker) {
@@ -323,6 +341,7 @@ function renderEarningsCard(entry) {
       <span class="price">${priceLine}</span>
     </div>
     <button class="view-detail-btn" ${hasPrice ? '' : 'disabled'}>+ Add 10-day chart to Search</button>
+    <div class="reaction-slot"></div>
   `;
 
   const detailBtn = card.querySelector('.view-detail-btn');
@@ -334,7 +353,127 @@ function renderEarningsCard(entry) {
   });
 
   earningsGrid.appendChild(card);
+  attachReactionButton(card, entry.ticker, { autoTrack: true });
+
+  // If this ticker's panel was open before the last refresh, silently
+  // re-open and re-fetch it now so auto-refresh doesn't lose your place.
+  if (openReactionTickers.has(entry.ticker)) {
+    const btn = card.querySelector('.reaction-btn');
+    if (btn) btn.click();
+  }
 }
+
+// ============================================================================
+// EARNINGS REACTION — EPS beat/miss + pre/post-market move, on any card
+// ============================================================================
+
+/**
+ * Adds a "📊 Check Result" button (+ empty slot for the result panel) to a
+ * card. Works on both Search-view cards (which already have a
+ * `.reaction-slot` div from renderCard) and Earnings-view cards.
+ * `autoTrack: true` means this card lives in the Earnings Calendar view, so
+ * its open/closed state is remembered across reloads and auto-refresh.
+ */
+function attachReactionButton(card, ticker, { autoTrack }) {
+  let slot = card.querySelector('.reaction-slot');
+  if (!slot) {
+    slot = document.createElement('div');
+    slot.className = 'reaction-slot';
+    card.appendChild(slot);
+  }
+
+  const btn = document.createElement('button');
+  btn.className = 'reaction-btn';
+  btn.textContent = '📊 Check Result';
+  slot.before(btn);
+
+  let expanded = false;
+
+  btn.addEventListener('click', async () => {
+    if (expanded) {
+      // Collapse.
+      expanded = false;
+      slot.innerHTML = '';
+      btn.textContent = '📊 Check Result';
+      if (autoTrack) openReactionTickers.delete(ticker);
+      return;
+    }
+
+    expanded = true;
+    btn.textContent = 'Loading…';
+    slot.innerHTML = '<div class="reaction-box">Loading…</div>';
+    if (autoTrack) openReactionTickers.add(ticker);
+
+    try {
+      const res = await fetch(`/api/earnings-reaction/${encodeURIComponent(ticker)}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Failed to load result for ${ticker}`);
+
+      renderReactionBox(slot, data);
+      btn.textContent = '📊 Hide Result';
+
+      if (autoTrack) {
+        const prev = lastKnownReportedState.get(ticker);
+        if (prev === false && data.hasReported === true) {
+          card.classList.add('flash');
+          setTimeout(() => card.classList.remove('flash'), 4000);
+        }
+        lastKnownReportedState.set(ticker, data.hasReported);
+      }
+    } catch (err) {
+      slot.innerHTML = `<div class="reaction-box">⚠️ ${escapeHtml(err.message)}</div>`;
+      btn.textContent = '📊 Hide Result';
+    }
+  });
+}
+
+function renderReactionBox(slot, data) {
+  const v = data.verdict || { label: 'Neutral', emoji: '⚪' };
+  const verdictClass = v.label.toLowerCase().split(' ')[0]; // 'bullish' | 'bearish' | 'mixed' | 'neutral' | 'awaiting'
+
+  if (!data.hasReported) {
+    slot.innerHTML = `
+      <div class="reaction-box">
+        <div class="reaction-verdict ${verdictClass}">${v.emoji} ${escapeHtml(v.label)}</div>
+        <div class="reaction-row"><span>Latest quarter EPS not reported yet</span></div>
+      </div>
+    `;
+    return;
+  }
+
+  const rows = [
+    ['EPS Estimate', fmt(data.epsEstimate)],
+    ['EPS Actual', fmt(data.epsActual)],
+    ['Surprise', data.epsSurprisePercent === null ? '—' : `${data.epsSurprisePercent > 0 ? '+' : ''}${fmt(data.epsSurprisePercent)}%`],
+    [`Price move (${escapeHtml(data.reactionLabel || 'session')})`, data.reactionChangePercent === null ? '—' : `${data.reactionChangePercent > 0 ? '+' : ''}${fmt(data.reactionChangePercent)}%`],
+  ];
+
+  slot.innerHTML = `
+    <div class="reaction-box">
+      <div class="reaction-verdict ${verdictClass}">${v.emoji} ${escapeHtml(v.label)}</div>
+      ${rows.map(([label, val]) => `<div class="reaction-row"><span>${label}</span><span>${val}</span></div>`).join('')}
+      <div class="reaction-disclaimer">Automated read of EPS beat/miss + price reaction — not financial advice.</div>
+    </div>
+  `;
+}
+
+// ============================================================================
+// Auto-refresh (Earnings Calendar view only)
+// ============================================================================
+// Not true real-time push — it's a periodic poll while this tab stays open,
+// bounded by the same rate-limit-friendly caps as everything else here (see
+// README). Good enough to notice a result landing within a couple of
+// minutes without you having to keep hitting reload.
+const AUTO_REFRESH_INTERVAL_MS = 2 * 60 * 1000;
+
+autoRefreshToggle.addEventListener('change', () => {
+  if (autoRefreshToggle.checked) {
+    autoRefreshTimer = setInterval(loadEarnings, AUTO_REFRESH_INTERVAL_MS);
+  } else if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+  }
+});
 
 // ============================================================================
 // Startup

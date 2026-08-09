@@ -99,6 +99,156 @@ app.get('/api/stock/:ticker', async (req, res) => {
 });
 
 // ============================================================================
+// GET /api/earnings-reaction/:ticker — EPS beat/miss + pre/post-market move
+// ============================================================================
+app.get('/api/earnings-reaction/:ticker', async (req, res) => {
+  const rawTicker = String(req.params.ticker || '').trim().toUpperCase();
+
+  if (!isValidTickerFormat(rawTicker)) {
+    return res.status(400).json({ error: 'Please enter a valid ticker symbol.' });
+  }
+
+  try {
+    const url =
+      'https://query1.finance.yahoo.com/v10/finance/quoteSummary/' +
+      encodeURIComponent(rawTicker) +
+      '?modules=earningsHistory,price';
+
+    const response = await fetch(url, {
+      headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
+    });
+
+    if (!response.ok) {
+      return res.status(502).json({
+        error: `Yahoo Finance returned HTTP ${response.status} for "${rawTicker}". It may be an invalid ticker, or Yahoo is temporarily rate-limiting requests.`,
+      });
+    }
+
+    const data = await response.json();
+    const result = data && data.quoteSummary && data.quoteSummary.result && data.quoteSummary.result[0];
+
+    if (!result) {
+      const errDesc = (data && data.quoteSummary && data.quoteSummary.error && data.quoteSummary.error.description) || 'No data returned.';
+      return res.status(404).json({ error: `No data found for "${rawTicker}". ${errDesc}` });
+    }
+
+    const priceInfo = result.price || {};
+    const history = (result.earningsHistory && result.earningsHistory.history) || [];
+
+    // Pick the most recent quarter by "quarter" (period-end) timestamp —
+    // Yahoo doesn't guarantee array order across all tickers, so we sort
+    // defensively rather than assuming history[0] is newest.
+    const withQuarter = history.filter((h) => h && h.quarter);
+    withQuarter.sort((a, b) => toEpoch(b.quarter) - toEpoch(a.quarter));
+    const latest = withQuarter[0] || null;
+
+    const hasReported = !!latest && typeof latest.epsActual === 'number';
+
+    // Figure out which price move is the relevant "reaction" — pre-market
+    // change if we're currently in pre-market, post-market change if we're
+    // in post/after-hours, otherwise the regular session's change.
+    const marketState = priceInfo.marketState || 'REGULAR';
+    let reactionChangePercent = null;
+    let reactionLabel = 'Regular session';
+    if (marketState === 'PRE' || marketState === 'PREPRE') {
+      reactionChangePercent = numOrNull(priceInfo.preMarketChangePercent);
+      reactionLabel = 'Pre-market';
+    } else if (marketState === 'POST' || marketState === 'POSTPOST') {
+      reactionChangePercent = numOrNull(priceInfo.postMarketChangePercent);
+      reactionLabel = 'After-hours';
+    } else {
+      reactionChangePercent = numOrNull(priceInfo.regularMarketChangePercent);
+      reactionLabel = 'Regular session';
+    }
+    // If the "obvious" session has no data (e.g. after-hours but Yahoo
+    // hasn't posted a postMarket move yet), fall back through the others
+    // rather than showing nothing.
+    if (reactionChangePercent === null) {
+      const fallbacks = [
+        ['Pre-market', numOrNull(priceInfo.preMarketChangePercent)],
+        ['Regular session', numOrNull(priceInfo.regularMarketChangePercent)],
+        ['After-hours', numOrNull(priceInfo.postMarketChangePercent)],
+      ];
+      for (const [label, val] of fallbacks) {
+        if (val !== null) {
+          reactionChangePercent = val;
+          reactionLabel = label;
+          break;
+        }
+      }
+    }
+
+    const verdict = computeBullishBearish(hasReported, latest, reactionChangePercent);
+
+    res.json({
+      ticker: priceInfo.symbol || rawTicker,
+      name: priceInfo.longName || priceInfo.shortName || rawTicker,
+      marketState,
+      hasReported,
+      epsEstimate: hasReported ? numOrNull(latest.epsEstimate) : null,
+      epsActual: hasReported ? numOrNull(latest.epsActual) : null,
+      epsSurprisePercent: hasReported ? numOrNull(latest.surprisePercent) : null,
+      quarterEndDate: hasReported ? isoFromEpoch(latest.quarter) : null,
+      currentPrice: numOrNull(priceInfo.regularMarketPrice),
+      preMarketPrice: numOrNull(priceInfo.preMarketPrice),
+      preMarketChangePercent: numOrNull(priceInfo.preMarketChangePercent),
+      postMarketPrice: numOrNull(priceInfo.postMarketPrice),
+      postMarketChangePercent: numOrNull(priceInfo.postMarketChangePercent),
+      reactionLabel,
+      reactionChangePercent,
+      verdict, // { label: 'Bullish' | 'Bearish' | 'Mixed' | 'Neutral' | 'Awaiting results', emoji }
+    });
+  } catch (err) {
+    console.error(`Error fetching earnings reaction for ${rawTicker}:`, err);
+    res.status(500).json({ error: `Server error fetching earnings reaction for "${rawTicker}": ${err.message}` });
+  }
+});
+
+/**
+ * Simple, transparent heuristic — NOT financial advice, just a readable
+ * summary of two facts: did EPS beat/miss estimates, and did the price
+ * move up or down in reaction. Both are shown alongside the label so you
+ * can judge for yourself; "Mixed" covers the (common) case where the
+ * two disagree, e.g. an EPS beat that the market still sells off on
+ * because of weak guidance.
+ */
+function computeBullishBearish(hasReported, latest, reactionChangePercent) {
+  if (!hasReported) {
+    return { label: 'Awaiting results', emoji: '⏳' };
+  }
+  const epsActual = numOrNull(latest.epsActual);
+  const epsEstimate = numOrNull(latest.epsEstimate);
+  const beat = epsActual !== null && epsEstimate !== null ? epsActual > epsEstimate : null;
+  const miss = epsActual !== null && epsEstimate !== null ? epsActual < epsEstimate : null;
+  const priceUp = reactionChangePercent !== null ? reactionChangePercent > 0 : null;
+  const priceDown = reactionChangePercent !== null ? reactionChangePercent < 0 : null;
+
+  if (beat === null || priceUp === null) {
+    return { label: 'Neutral', emoji: '⚪' };
+  }
+  if (beat && priceUp) return { label: 'Bullish', emoji: '🟢' };
+  if (miss && priceDown) return { label: 'Bearish', emoji: '🔴' };
+  if (!beat && !miss) return { label: 'Neutral', emoji: '⚪' }; // met estimate exactly
+  return { label: 'Mixed', emoji: '⚠️' }; // beat-but-sold-off or miss-but-bought-up
+}
+
+function numOrNull(n) {
+  return typeof n === 'number' && isFinite(n) ? n : null;
+}
+
+/** Yahoo's quoteSummary dates come back as { raw: epochSeconds, fmt: '...' } or a plain epoch number. */
+function toEpoch(dateField) {
+  if (dateField && typeof dateField === 'object' && typeof dateField.raw === 'number') return dateField.raw;
+  if (typeof dateField === 'number') return dateField;
+  return 0;
+}
+
+function isoFromEpoch(dateField) {
+  const epoch = toEpoch(dateField);
+  return epoch ? new Date(epoch * 1000).toISOString().slice(0, 10) : null;
+}
+
+// ============================================================================
 // GET /api/earnings?date=YYYY-MM-DD — all tickers reporting that day, priced
 // ============================================================================
 app.get('/api/earnings', async (req, res) => {
