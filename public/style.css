@@ -1,0 +1,389 @@
+:root {
+  --bg: #0f172a;
+  --card-bg: #1e293b;
+  --card-border: #334155;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --accent: #38bdf8;
+  --positive: #4ade80;
+  --negative: #f87171;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 20px 28px;
+  border-bottom: 1px solid var(--card-border);
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.search-form {
+  display: flex;
+  gap: 8px;
+}
+
+.search-form input {
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: 14px;
+  min-width: 220px;
+}
+
+.search-form input:focus {
+  outline: 2px solid var(--accent);
+}
+
+.search-form button {
+  padding: 10px 18px;
+  border-radius: 8px;
+  border: none;
+  background: var(--accent);
+  color: #041014;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.search-form button:hover {
+  opacity: 0.9;
+}
+
+main {
+  padding: 24px 28px 60px;
+}
+
+.status {
+  color: var(--muted);
+  font-size: 14px;
+  margin: 0 0 16px;
+}
+
+.status.warning {
+  color: #fbbf24;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 18px;
+}
+
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 14px;
+  padding: 16px 18px;
+}
+
+.card.loading,
+.card.error {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.ticker {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.company-name {
+  color: var(--muted);
+  font-size: 12px;
+  display: block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remove-btn {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+
+.remove-btn:hover {
+  color: var(--negative);
+}
+
+.card-price-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.price {
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.change {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.change.positive {
+  color: var(--positive);
+}
+
+.change.negative {
+  color: var(--negative);
+}
+
+.sparkline {
+  margin-top: 10px;
+}
+
+.spark {
+  width: 100%;
+  height: 50px;
+  display: block;
+}
+
+.spark.up polyline {
+  stroke: var(--positive);
+}
+
+.spark.down polyline {
+  stroke: var(--negative);
+}
+
+.table-toggle {
+  margin-top: 12px;
+  font-size: 13px;
+}
+
+.table-toggle summary {
+  cursor: pointer;
+  color: var(--accent);
+}
+
+.table-wrap {
+  overflow-x: auto;
+  margin-top: 8px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+th,
+td {
+  text-align: right;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--card-border);
+  white-space: nowrap;
+}
+
+th:first-child,
+td:first-child {
+  text-align: left;
+}
+
+.card-footer {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.error-msg {
+  color: var(--negative);
+  font-size: 13px;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Menu / view switching                                                   */
+/* ---------------------------------------------------------------------- */
+
+.menu {
+  display: flex;
+  gap: 8px;
+}
+
+.menu-btn {
+  padding: 9px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: var(--card-bg);
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.menu-btn:hover {
+  color: var(--text);
+}
+
+.menu-btn.active {
+  background: var(--accent);
+  color: #041014;
+  border-color: var(--accent);
+}
+
+.view.hidden {
+  display: none;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Earnings Calendar view                                                  */
+/* ---------------------------------------------------------------------- */
+
+.earnings-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.quick-dates {
+  display: flex;
+  gap: 8px;
+}
+
+.quick-date-btn {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.quick-date-btn:hover,
+.quick-date-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.date-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.date-label input[type='date'] {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: 13px;
+}
+
+#loadEarningsBtn {
+  padding: 9px 18px;
+  border-radius: 8px;
+  border: none;
+  background: var(--accent);
+  color: #041014;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#loadEarningsBtn:hover {
+  opacity: 0.9;
+}
+
+.earnings-summary {
+  font-size: 12px;
+  color: var(--muted);
+  margin: -6px 0 16px;
+}
+
+.card.compact {
+  padding: 14px 16px;
+}
+
+.time-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(56, 189, 248, 0.15);
+  color: var(--accent);
+  margin-left: 8px;
+}
+
+.view-detail-btn {
+  margin-top: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.view-detail-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.view-detail-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+@media (max-width: 480px) {
+  .topbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .search-form input {
+    min-width: 0;
+    flex: 1;
+  }
+  .menu {
+    flex-wrap: wrap;
+  }
+  .earnings-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

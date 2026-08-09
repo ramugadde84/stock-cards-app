@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Stock Watch — 10-Day EOD Prices</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>📈 Stock Watch</h1>
+    <nav class="menu">
+      <button class="menu-btn active" data-view="search" type="button">🔍 Search Ticker</button>
+      <button class="menu-btn" data-view="earnings" type="button">📅 Earnings Calendar</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- ==================== SEARCH VIEW ==================== -->
+    <section id="searchView" class="view">
+      <form id="searchForm" class="search-form">
+        <input id="tickerInput" type="text" placeholder="Search a ticker, e.g. AAPL" autocomplete="off" />
+        <button type="submit">Add</button>
+      </form>
+      <p id="statusMsg" class="status"></p>
+      <div id="cardGrid" class="card-grid"></div>
+    </section>
+
+    <!-- ==================== EARNINGS CALENDAR VIEW ==================== -->
+    <section id="earningsView" class="view hidden">
+      <div class="earnings-controls">
+        <div class="quick-dates">
+          <button type="button" class="quick-date-btn" data-offset="0">Today</button>
+          <button type="button" class="quick-date-btn" data-offset="1">Tomorrow</button>
+        </div>
+        <label class="date-label">
+          Date:
+          <input type="date" id="earningsDate" />
+        </label>
+        <button type="button" id="loadEarningsBtn">Load Earnings</button>
+      </div>
+      <p id="earningsStatus" class="status"></p>
+      <div id="earningsGrid" class="card-grid"></div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
