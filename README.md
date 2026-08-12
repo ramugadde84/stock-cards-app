@@ -14,7 +14,13 @@ A small local web app with two views, switched from the menu at the top:
   time. Click "+ Add 10-day chart to Search" on any card to pull it into
   the Search view with full 10-day detail.
 
-Both views also have a **📊 Check Result** button on every card: it shows
+- **🏷️ Coupons** — look up promo codes a merchant has published to an
+  affiliate network, plus a local tracker for saving codes you find
+  anywhere and recording whether they actually worked. See
+  "Coupons — what this can and can't do" below, which is worth reading
+  before you expect too much of it.
+
+Both the stock views also have a **📊 Check Result** button on every card: it shows
 the latest quarter's EPS estimate vs. actual, the surprise %, the
 pre-market/after-hours/regular-session price move, and a simple
 Bullish/Bearish/Mixed label based on those two facts. In the Earnings
@@ -59,6 +65,10 @@ PORT=8080 npm start
     calendar page for that date (see `earnings.js`), then fetches a
     current price for every ticker found and returns them all as JSON.
     Defaults to today if `date` is omitted.
+  - `GET /api/coupons?store=NAME` → looks up merchant-published promo codes
+    via an affiliate network (see `coupons.js`). Returns
+    `{ configured: false, note }` rather than an error when no API token is
+    set, so the feature degrades gracefully.
   - `GET /api/earnings-reaction/:ticker` → calls Yahoo's `quoteSummary`
     endpoint (`earningsHistory` + `price` modules) to get the most recent
     quarter's EPS estimate/actual/surprise plus pre-market, regular, and
@@ -77,6 +87,168 @@ PORT=8080 npm start
   `localStorage`, which just remembers which tickers you searched in the
   Search view so the page repopulates them on reload. Clearing your
   browser data resets that.
+
+## Benzinga integration (licensed data)
+
+Every card in the Search view has a **🐂🐻 Bull / Bear (Benzinga)** button.
+Unlike the Yahoo endpoints this app uses elsewhere — which are unofficial and
+undocumented — Benzinga is a real licensed API, so the data is authoritative
+and the response shapes are stable.
+
+**Never hardcode your API key.** It's a billable credential. Pass it via the
+environment:
+
+```bash
+# macOS / Linux
+BENZINGA_API_KEY=bz.xxxxxxxx npm start
+
+# Windows CMD
+set BENZINGA_API_KEY=bz.xxxxxxxx && npm start
+
+# Windows PowerShell
+$env:BENZINGA_API_KEY="bz.xxxxxxxx"; npm start
+```
+
+The included `.gitignore` already excludes `.env`, so if you prefer a file,
+put it there rather than in source. If a key ever gets pasted somewhere
+public (chat, a screenshot, a commit), regenerate it immediately.
+
+**What the panel pulls** (`GET /api/benzinga/:ticker`):
+
+| Dataset | Endpoint | What it gives you |
+|---|---|---|
+| Bull / Bear cases | `/api/v1/bulls_bears_say` | Benzinga's own written bull and bear arguments |
+| Earnings | `/api/v2.1/calendar/earnings` | EPS + revenue actual vs. estimate, surprise % |
+| Why Is It Moving | `/api/v2/news` (WIIM channel) | One-line reasons for today's move |
+| Analyst ratings | `/api/v2/calendar/ratings` | Upgrades/downgrades, price target changes |
+| News | `/api/v2/news` | Recent headlines |
+
+**Each dataset is fetched independently and reports its own `ok`/`error`.**
+Benzinga licenses products individually, so one key doesn't necessarily
+unlock everything — this design means an unlicensed dataset shows a note in
+its own section instead of breaking the whole panel. Practical side effect:
+run it once on any ticker and the panel tells you exactly which products
+your key covers. A `403` in a section means "not in your license."
+
+**About the verdict label:** it's a mechanical read of beat/miss only — EPS
+vs. consensus and revenue vs. consensus, nothing more. It is not a
+prediction and not advice. The Benzinga bull/bear text shown underneath is
+the actual analysis; read that rather than the label.
+
+### WebSocket tester UI (`public/ws-tool.html`)
+
+A browser-based tester for any `wss://` endpoint. Start the server and open:
+
+```
+http://localhost:3000/ws-tool.html
+```
+
+**Why browser rather than a Node script:** Node's `fetch()` and `WebSocket`
+do not use the Windows system proxy and ignore `HTTP_PROXY`. On a corporate
+network that means the identical URL works in Chrome and fails from a
+script. This tool uses the browser's own stack, so if the endpoint is
+reachable at all, this reaches it — which makes it the fastest way to tell
+"my token/licence is wrong" apart from "my local Node setup can't get out."
+
+Features: stream presets, token field (masked, and never written to the log
+or URL preview), `ping`/`replay` buttons, pretty-printed JSON log, live
+message counter, and plain-English explanations of close codes.
+
+Open it from `http://localhost:3000/...`, not by double-clicking the file —
+browsers block `wss://` from `file://` origins. The tool warns you if you do.
+
+### Real-time WebSocket streams (`bz-stream.js`)
+
+Benzinga also pushes data over WebSocket (`wss://`) — a persistent
+connection where events arrive the moment they happen, instead of polling.
+`bz-stream.js` is a standalone tester for it:
+
+```bash
+# Windows CMD
+set BENZINGA_API_KEY=bz.xxxx && node bz-stream.js
+
+# optional: pick tickers and which stream
+node bz-stream.js AAPL,TSLA news
+```
+
+Streams available per their docs (licence permitting): `bulls_bears_say`,
+`calendar/earnings`, `calendar/ratings`, `consensus_ratings`, `news`,
+`transcripts`.
+
+**Node version note:** global `WebSocket` only exists in Node 22+. On Node
+20 or older you'll get `ReferenceError: WebSocket is not defined` — the
+script now falls back to the `ws` package automatically, so just run
+`npm install` once and it works. It prints which implementation it's using
+on startup.
+
+**Silence is not failure.** These streams only push when an event occurs,
+and bull/bear updates and earnings are infrequent. `✓ Connected` followed by
+nothing means it's working. Test against `news` first — it's the busiest
+stream, so it proves data is actually flowing.
+
+**Close code 1006** on connect usually means a rejected token or a stream
+your licence doesn't cover. The script explains the common codes rather than
+leaving you with a bare number, and it redacts the token from its own output
+so you can paste terminal logs safely.
+
+## Coupons — what this can and can't do
+
+**The honest summary: there is no legitimate, general way to write code that
+verifies an arbitrary promo code works on an arbitrary store.** The only real
+test is running that retailer's checkout with the code applied, and that:
+
+- is completely different on every store, so it can't be generalised;
+- is explicitly prohibited by most retailers' terms of service;
+- trips bot detection and rate limiting almost immediately; and
+- looks identical to card-testing fraud from the retailer's side, which can
+  get an IP or account blocked.
+
+So this feature deliberately does **not** try to auto-test codes. It does the
+two things that *are* legitimate and useful:
+
+**1. Merchant-published lookup (needs a free API token).**
+Retailers publish their own current promotions — with real start and end
+dates — to affiliate networks. That's the merchant as the source of truth,
+which is far more reliable than crowd-sourced coupon-site listings. The app
+queries one of those networks and filters out anything already expired.
+
+To enable it, register as a publisher (free, but there's a manual approval
+step) with one of:
+
+- [Rakuten Advertising](https://rakutenadvertising.com/) — default
+- [Impact](https://impact.com/)
+- [Awin](https://www.awin.com/) (now includes ShareASale)
+
+then start the server with your token:
+
+```bash
+COUPON_API_TOKEN=your_token_here npm start
+# or to use a different network:
+COUPON_PROVIDER=impact COUPON_API_TOKEN=your_token_here npm start
+```
+
+Without a token the app doesn't error — the lookup box just reports that it
+isn't configured, and everything else keeps working.
+
+**2. "My Saved Codes" — works immediately, no key needed.**
+Save any code you find (from anywhere), with store, note, and expiry. Then
+mark **✓ Worked** or **✗ Didn't work** after you try it, and it records the
+date. Over time this becomes your own verified list — which is the practical
+substitute for automated validation, since you're doing the one step that
+can't be automated. Stored in your browser's `localStorage`, nothing leaves
+your machine.
+
+**Caveat even on published codes:** "published and unexpired" still isn't
+"guaranteed to work." Codes are often restricted by product, minimum spend,
+region, or first-time-customer status. The UI says this too.
+
+**One implementation note:** the three network adapters in `coupons.js`
+follow each network's published API docs, but a live publisher token is
+needed to exercise them and I didn't have one — so expect to adjust field
+names on your first real run. The code is defensive about it (it logs the
+raw response shape to the server console when parsing fails, and normalises
+across several possible field names per value), but it's the part most
+likely to need a tweak.
 
 ## Deploying online (so you can access it from anywhere, not just localhost)
 

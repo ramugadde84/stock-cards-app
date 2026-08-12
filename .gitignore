@@ -1,3 +1,8 @@
 node_modules/
-.env
 *.log
+
+# Secrets — never commit API keys. BENZINGA_API_KEY and COUPON_API_TOKEN
+# are billable credentials; keep them in the environment or a local .env.
+.env
+.env.*
+!.env.example

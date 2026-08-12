@@ -12,6 +12,8 @@
     <nav class="menu">
       <button class="menu-btn active" data-view="search" type="button">🔍 Search Ticker</button>
       <button class="menu-btn" data-view="earnings" type="button">📅 Earnings Calendar</button>
+      <button class="menu-btn" data-view="macro" type="button">📅 Key Dates</button>
+      <button class="menu-btn" data-view="coupons" type="button">🏷️ Coupons</button>
     </nav>
   </header>
 
@@ -43,8 +45,75 @@
           🔴 Auto-refresh every 2 min
         </label>
       </div>
+
+      <div class="session-bar">
+        <span class="session-label">Session:</span>
+        <button type="button" class="session-btn" data-session="pre">🌅 Pre-market (BMO)</button>
+        <button type="button" class="session-btn" data-session="post">🌙 After-market (AMC)</button>
+        <button type="button" class="session-btn" data-session="all">All</button>
+        <label class="source-toggle" title="Skips per-ticker price lookups. Much faster and returns every ticker with no cap — use this when you want the complete list.">
+          <input type="checkbox" id="skipPricesToggle" />
+          Fast mode (all tickers, no prices)
+        </label>
+        <label class="source-toggle" title="Benzinga has real revenue figures but requires a licensed key; Yahoo is free but only ranks by price.">
+          <input type="checkbox" id="useBenzingaToggle" />
+          Use Benzinga (rank by revenue)
+        </label>
+      </div>
       <p id="earningsStatus" class="status"></p>
       <div id="earningsGrid" class="card-grid"></div>
+    </section>
+
+    <!-- ==================== KEY DATES VIEW ==================== -->
+    <section id="macroView" class="view hidden">
+      <div class="macro-head">
+        <h2 class="section-heading" style="margin:0;padding:0;border:0;">Key economic dates</h2>
+        <span class="macro-source" id="macroSource"></span>
+        <span class="tz-note">times in US Central (CT)</span>
+        <button type="button" id="macroRefresh" class="macro-refresh" title="Refresh">↻ Refresh</button>
+      </div>
+      <p class="section-sub">
+        CPI, jobs report and FOMC decisions. Past dates drop off automatically and the
+        next month rolls in, so this stays current without any upkeep.
+      </p>
+      <div id="macroList" class="macro-list">Loading…</div>
+
+      <h2 class="section-heading">Recently passed</h2>
+      <div id="macroPast" class="macro-list"></div>
+    </section>
+
+    <!-- ==================== COUPONS VIEW ==================== -->
+    <section id="couponsView" class="view hidden">
+      <div class="disclaimer-box">
+        <strong>How this works:</strong> codes come from what merchants publish to
+        affiliate networks (with real start/end dates), not from scraped coupon
+        sites. Nothing here is auto-tested at checkout — there's no legitimate way
+        to do that across arbitrary stores. Published &amp; unexpired ≠ guaranteed to
+        work, since codes can be limited by product, minimum spend, region, or
+        first-time customers. Use <em>My Saved Codes</em> to record what actually
+        happened when you tried one.
+      </div>
+
+      <form id="couponForm" class="search-form">
+        <input id="storeInput" type="text" placeholder="Store name, e.g. nike" autocomplete="off" />
+        <button type="submit">Look Up</button>
+      </form>
+      <p id="couponStatus" class="status"></p>
+      <div id="couponGrid" class="card-grid"></div>
+
+      <h2 class="section-heading">My Saved Codes</h2>
+      <p class="section-sub">
+        Track codes you find anywhere. Mark whether each one actually worked so you
+        build your own verified list over time.
+      </p>
+      <form id="saveCouponForm" class="save-coupon-form">
+        <input id="saveStore" type="text" placeholder="Store" required />
+        <input id="saveCode" type="text" placeholder="Code" required />
+        <input id="saveNote" type="text" placeholder="What it's for (optional)" />
+        <input id="saveExpiry" type="date" title="Expiry date (optional)" />
+        <button type="submit">Save</button>
+      </form>
+      <div id="savedGrid" class="card-grid"></div>
     </section>
   </main>
 

@@ -19,6 +19,16 @@
 const express = require('express');
 const path = require('path');
 const { getEarningsForDate } = require('./earnings');
+const { getCoupons } = require('./coupons');
+const {
+  getTickerReport,
+  getBullsBearsOnly,
+  getEarningsThisMonthOnly,
+  getEarningsCalendarOnly,
+} = require('./benzinga');
+const { analyzeEarnings, isConfigured: aiConfigured } = require('./ai');
+const { httpFetch } = require('./httpClient');
+const { getMacroCalendar } = require('./macro');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -31,8 +41,8 @@ const USER_AGENT =
 // price lookups on very high-volume earnings days (some single days have
 // 400-600+ companies reporting) — keeps response times reasonable and
 // avoids hammering Yahoo. See README.md.
-const MAX_EARNINGS_TICKERS = 150;
-const EARNINGS_QUOTE_BATCH_SIZE = 20;
+const MAX_EARNINGS_TICKERS = Number(process.env.MAX_EARNINGS_TICKERS || 600);
+const EARNINGS_QUOTE_BATCH_SIZE = Number(process.env.EARNINGS_BATCH_SIZE || 30);
 
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -114,7 +124,7 @@ app.get('/api/earnings-reaction/:ticker', async (req, res) => {
       encodeURIComponent(rawTicker) +
       '?modules=earningsHistory,price';
 
-    const response = await fetch(url, {
+    const response = await httpFetch(url, {
       headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
     });
 
@@ -253,35 +263,88 @@ function isoFromEpoch(dateField) {
 // ============================================================================
 app.get('/api/earnings', async (req, res) => {
   const dateStr = String(req.query.date || todayYMD()).trim();
+  const session = String(req.query.session || 'all').trim().toLowerCase();
 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
     return res.status(400).json({ error: '"date" must be in YYYY-MM-DD format.' });
   }
+  const allowedSessions = ['pre', 'post', 'other', 'all'];
+  if (!allowedSessions.includes(session)) {
+    return res.status(400).json({ error: `"session" must be one of: ${allowedSessions.join(', ')}` });
+  }
+
+  // Pricing is the slow part — one upstream request per ticker. Skipping it
+  // returns the complete list instantly, which is what you want when the
+  // goal is "show me every pre-market name" rather than "show me prices".
+  const withPrices = String(req.query.prices || 'true').toLowerCase() !== 'false';
 
   try {
-    let entries = await getEarningsForDate(dateStr);
-    const totalFound = entries.length;
-    let capped = false;
+    const { entries: allEntries, diagnostics } = await getEarningsForDate(dateStr);
+    let entries = allEntries;
+    const totalForDate = entries.length;
 
-    if (entries.length > MAX_EARNINGS_TICKERS) {
+    // Yahoo's calendar gives BMO/AMC/TNS directly, so the split is exact
+    // here rather than inferred from a clock time.
+    //   BMO = before market open  -> pre
+    //   AMC = after market close  -> post
+    //   TNS/TAS/N-A = time not supplied -> other
+    if (session !== 'all') {
+      entries = entries.filter((e) => sessionOf(e.time) === session);
+    }
+    const totalInSession = entries.length;
+
+    // Without pricing there's no per-ticker upstream work, so the cap only
+    // applies when prices are requested.
+    let capped = false;
+    if (withPrices && entries.length > MAX_EARNINGS_TICKERS) {
       entries = entries.slice(0, MAX_EARNINGS_TICKERS);
       capped = true;
     }
 
-    const priced = await priceEarningsEntries(entries);
+    let results;
+    if (withPrices) {
+      results = await priceEarningsEntries(entries);
+      // Rank by price descending as a rough size proxy. Yahoo's calendar
+      // page doesn't expose revenue, so price is the only size-ish figure
+      // on this path — the Benzinga route ranks by actual revenue.
+      results.sort((a, b) => {
+        if (a.price === null && b.price === null) return String(a.ticker).localeCompare(String(b.ticker));
+        if (a.price === null) return 1;
+        if (b.price === null) return -1;
+        return b.price - a.price;
+      });
+    } else {
+      // List-only mode: every ticker, alphabetical, no upstream price calls.
+      results = entries
+        .map((e) => ({ ...e, price: null, name: e.ticker, currency: '' }))
+        .sort((a, b) => String(a.ticker).localeCompare(String(b.ticker)));
+    }
 
     res.json({
       date: dateStr,
-      totalFound,
-      returnedCount: priced.length,
-      capped, // true if totalFound > MAX_EARNINGS_TICKERS — see README
-      results: priced,
+      session,
+      totalForDate,
+      totalInSession,
+      returnedCount: results.length,
+      capped, // true if totalInSession > MAX_EARNINGS_TICKERS — see README
+      pricesIncluded: withPrices,
+      sortedBy: withPrices ? 'price' : 'ticker',
+      diagnostics, // pagination detail — explains a short list
+      results,
     });
   } catch (err) {
     console.error(`Error fetching earnings for ${dateStr}:`, err);
     res.status(500).json({ error: `Server error fetching earnings for ${dateStr}: ${err.message}` });
   }
 });
+
+/** Maps Yahoo's BMO/AMC/TNS call-time codes to a session bucket. */
+function sessionOf(time) {
+  const t = String(time || '').toUpperCase();
+  if (t === 'BMO') return 'pre';
+  if (t === 'AMC') return 'post';
+  return 'other';
+}
 
 /** Fetches current price + name for each earnings entry, in parallel batches. */
 async function priceEarningsEntries(entries) {
@@ -312,6 +375,207 @@ async function priceEarningsEntries(entries) {
 }
 
 // ============================================================================
+// GET /api/bulls-bears/:ticker — just the bull & bear cases (card button)
+// ============================================================================
+// Deliberately hits only the bulls_bears_say endpoint. Fast, and unaffected
+// by whether other Benzinga datasets are in your licence.
+app.get('/api/bulls-bears/:ticker', async (req, res) => {
+  const rawTicker = String(req.params.ticker || '').trim().toUpperCase();
+
+  if (!isValidTickerFormat(rawTicker)) {
+    return res.status(400).json({ error: 'Please enter a valid ticker symbol.' });
+  }
+
+  try {
+    const data = await getBullsBearsOnly(rawTicker);
+    res.json(data);
+  } catch (err) {
+    console.error(`Bulls/bears lookup failed for ${rawTicker}:`, err);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// GET /api/earnings-calendar?date=YYYY-MM-DD&session=pre|post|during|all
+// ============================================================================
+// All companies reporting on a date, filtered by trading session and ranked
+// by revenue (largest first). Benzinga-backed, so it carries real revenue
+// figures — unlike the Yahoo-scraped /api/earnings route.
+app.get('/api/earnings-calendar', async (req, res) => {
+  const dateStr = String(req.query.date || todayYMD()).trim();
+  const session = String(req.query.session || 'all').trim().toLowerCase();
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    return res.status(400).json({ error: '"date" must be in YYYY-MM-DD format.' });
+  }
+  const allowed = ['pre', 'post', 'during', 'unspecified', 'all'];
+  if (!allowed.includes(session)) {
+    return res.status(400).json({ error: `"session" must be one of: ${allowed.join(', ')}` });
+  }
+
+  try {
+    const data = await getEarningsCalendarOnly(dateStr, session);
+    res.json(data);
+  } catch (err) {
+    console.error(`Earnings calendar failed for ${dateStr}/${session}:`, err);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+
+// ============================================================================
+// GET /api/macro-calendar — CPI / jobs / FOMC dates, auto-rolling
+// ============================================================================
+app.get('/api/macro-calendar', async (req, res) => {
+  try {
+    const data = await getMacroCalendar();
+    res.json(data);
+  } catch (err) {
+    console.error('Macro calendar failed:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// GET /api/ai-analysis/:ticker — LLM read of the earnings + bull/bear data
+// ============================================================================
+// Gathers the Benzinga data server-side, then asks the model to weigh it.
+// The model never sees an API key and never calls out on its own — it only
+// ever analyses the payload assembled here.
+app.get('/api/ai-analysis/:ticker', async (req, res) => {
+  const rawTicker = String(req.params.ticker || '').trim().toUpperCase();
+
+  if (!isValidTickerFormat(rawTicker)) {
+    return res.status(400).json({ error: 'Please enter a valid ticker symbol.' });
+  }
+
+  if (!aiConfigured()) {
+    return res.json({
+      configured: false,
+      ticker: rawTicker,
+      note:
+        'ANTHROPIC_API_KEY is not set on the server. Set it on its own line ' +
+        '(Windows CMD appends a trailing space with `set VAR=x && ...`):\n' +
+        '    set ANTHROPIC_API_KEY=sk-ant-xxxx\n' +
+        '    npm start',
+    });
+  }
+
+  try {
+    // Pull both datasets, tolerating either being unavailable — the prompt
+    // explicitly handles missing sections and reports them as unknowns.
+    const [bbResult, earningsResult] = await Promise.allSettled([
+      getBullsBearsOnly(rawTicker),
+      getEarningsThisMonthOnly(rawTicker),
+    ]);
+
+    const bullsBears =
+      bbResult.status === 'fulfilled' && bbResult.value.found ? bbResult.value : null;
+
+    const earningsData =
+      earningsResult.status === 'fulfilled' && earningsResult.value.found
+        ? earningsResult.value.entries.find((e) => e.reported) || earningsResult.value.entries[0]
+        : null;
+
+    if (!bullsBears && !earningsData) {
+      return res.json({
+        configured: true,
+        ticker: rawTicker,
+        analyzed: false,
+        note: `No Benzinga earnings or bull/bear data available for ${rawTicker}, so there is nothing to analyse.`,
+      });
+    }
+
+    const analysis = await analyzeEarnings(rawTicker, {
+      earnings: earningsData,
+      bullsBears,
+    });
+
+    res.json({
+      configured: true,
+      ticker: rawTicker,
+      analyzed: true,
+      sourcesUsed: {
+        earnings: Boolean(earningsData),
+        bullBearCases: Boolean(bullsBears),
+      },
+      analysis,
+    });
+  } catch (err) {
+    console.error(`AI analysis failed for ${rawTicker}:`, err);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// GET /api/earnings-month/:ticker — earnings in the CURRENT month only
+// ============================================================================
+// Date-filtered server-side to the current calendar month. A ticker with no
+// earnings this month returns { found: false } — a normal state, not an error.
+app.get('/api/earnings-month/:ticker', async (req, res) => {
+  const rawTicker = String(req.params.ticker || '').trim().toUpperCase();
+
+  if (!isValidTickerFormat(rawTicker)) {
+    return res.status(400).json({ error: 'Please enter a valid ticker symbol.' });
+  }
+
+  try {
+    const data = await getEarningsThisMonthOnly(rawTicker);
+    res.json(data);
+  } catch (err) {
+    console.error(`Monthly earnings lookup failed for ${rawTicker}:`, err);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// GET /api/benzinga/:ticker — full multi-dataset report (earnings, WIIM, …)
+// ============================================================================
+// Unlike the Yahoo-backed routes above, this uses a real licensed API.
+// Each dataset reports its own ok/error so an unlicensed product degrades
+// gracefully instead of failing the whole request.
+app.get('/api/benzinga/:ticker', async (req, res) => {
+  const rawTicker = String(req.params.ticker || '').trim().toUpperCase();
+
+  if (!isValidTickerFormat(rawTicker)) {
+    return res.status(400).json({ error: 'Please enter a valid ticker symbol.' });
+  }
+
+  try {
+    const report = await getTickerReport(rawTicker);
+    res.json(report);
+  } catch (err) {
+    console.error(`Benzinga report failed for ${rawTicker}:`, err);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// GET /api/coupons?store=NAME — merchant-published promo codes for a store
+// ============================================================================
+// See coupons.js for why this pulls from affiliate networks rather than
+// trying to "verify" codes by driving retailer checkouts (short version:
+// there's no legitimate general way to do the latter).
+app.get('/api/coupons', async (req, res) => {
+  const store = String(req.query.store || '').trim();
+
+  if (!store) {
+    return res.status(400).json({ error: 'Please provide a store name, e.g. /api/coupons?store=nike' });
+  }
+  if (store.length > 60) {
+    return res.status(400).json({ error: 'Store name is too long.' });
+  }
+
+  try {
+    const result = await getCoupons(store);
+    res.json(result);
+  } catch (err) {
+    console.error(`Error fetching coupons for "${store}":`, err);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ============================================================================
 // Shared Yahoo Finance chart-endpoint helper
 // ============================================================================
 
@@ -327,7 +591,7 @@ async function fetchYahooChartResult(ticker, range) {
     encodeURIComponent(ticker) +
     '?range=' + range + '&interval=1d';
 
-  const response = await fetch(url, {
+  const response = await httpFetch(url, {
     headers: {
       'User-Agent': USER_AGENT,
       Accept: 'application/json',

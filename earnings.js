@@ -12,17 +12,26 @@
  * unofficial/undocumented endpoint, etc).
  */
 
+const { httpFetch } = require('./httpClient');
+
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-const DEFAULT_MAX_PAGES = 6;
-const DEFAULT_PAGE_SIZE = 100;
+// Raised from the original 6×100. A single heavy day can have 600+ companies
+// reporting, and the loop already stops early once a page yields nothing new,
+// so a high ceiling costs nothing on light days.
+const DEFAULT_MAX_PAGES = Number(process.env.EARNINGS_MAX_PAGES || 15);
+const DEFAULT_PAGE_SIZE = Number(process.env.EARNINGS_PAGE_SIZE || 100);
 
 /**
- * Returns an array of { ticker, date, time } for the given date
- * (YYYY-MM-DD). Pages through results (best-effort, see header comment)
- * until a page returns nothing new or maxPages is reached.
+ * Returns { entries, diagnostics } for the given date (YYYY-MM-DD).
+ *
+ * `diagnostics` matters: Yahoo's calendar is normally client-paginated, so
+ * whether the offset/size query params actually work is the difference
+ * between getting 100 tickers and getting all 500. Reporting pages fetched
+ * and rows-per-page makes a short list visibly diagnosable instead of
+ * looking like the day was quiet.
  */
 async function getEarningsForDate(dateStr, opts = {}) {
   const maxPages = opts.maxPages || DEFAULT_MAX_PAGES;
@@ -30,6 +39,8 @@ async function getEarningsForDate(dateStr, opts = {}) {
 
   const results = [];
   const seen = new Set();
+  const pageStats = [];
+  let stoppedBecause = 'reached maxPages';
 
   for (let page = 0; page < maxPages; page++) {
     const offset = page * pageSize;
@@ -46,12 +57,14 @@ async function getEarningsForDate(dateStr, opts = {}) {
         throw new Error(`Could not reach Yahoo Finance's earnings calendar for ${dateStr}: ${e.message}`);
       }
       console.error(`Calendar fetch failed for ${dateStr} offset ${offset}:`, e.message);
+      stoppedBecause = `fetch error on page ${page}`;
       break;
     }
     if (!html) {
       if (page === 0) {
         throw new Error(`Yahoo Finance's earnings calendar did not return usable content for ${dateStr}.`);
       }
+      stoppedBecause = `empty response on page ${page}`;
       break;
     }
 
@@ -65,13 +78,38 @@ async function getEarningsForDate(dateStr, opts = {}) {
       }
     }
 
-    // Stop once a "page" brings nothing new — either we've reached the end
-    // of the real results, or the offset/size params aren't actually
-    // paginating (in which case every page would be identical).
-    if (newCount === 0) break;
+    pageStats.push({ page, offset, parsed: rows.length, new: newCount });
+
+    // Stop once a page brings nothing new — either we've reached the end of
+    // the results, or offset/size aren't paginating and every page is
+    // identical. Which of those it was is recorded below.
+    if (newCount === 0) {
+      stoppedBecause =
+        page === 1 && rows.length > 0
+          ? 'page 2 returned the same rows as page 1 — Yahoo is ignoring the offset param, ' +
+            'so only the first page of results is reachable'
+          : `no new tickers on page ${page}`;
+      break;
+    }
   }
 
-  return results;
+  const diagnostics = {
+    pagesFetched: pageStats.length,
+    pageSize,
+    maxPages,
+    stoppedBecause,
+    pageStats,
+    // True when pagination clearly failed, so the caller can warn the user
+    // that the list is a first-page subset rather than the full day.
+    paginationLikelyBroken:
+      pageStats.length <= 1 && results.length > 0 && results.length <= pageSize,
+  };
+
+  console.log(
+    `[earnings] ${dateStr}: ${results.length} tickers from ${pageStats.length} page(s) — ${stoppedBecause}`
+  );
+
+  return { entries: results, diagnostics };
 }
 
 async function fetchCalendarPageHtml(dateStr, offset, pageSize) {
@@ -81,7 +119,7 @@ async function fetchCalendarPageHtml(dateStr, offset, pageSize) {
     '&size=' + pageSize +
     '&offset=' + offset;
 
-  const response = await fetch(url, {
+  const response = await httpFetch(url, {
     headers: {
       'User-Agent': USER_AGENT,
       Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',

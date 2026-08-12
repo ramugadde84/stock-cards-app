@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>WebSocket Tester</title>
+<!--
+  WebSocket Tester
+  ----------------
+  Runs in the browser deliberately. Node's fetch/WebSocket does NOT use the
+  Windows system proxy, so on a corporate network a wss:// endpoint can fail
+  from a script while working fine in Chrome. This tool uses the browser's
+  own network stack, so if the endpoint is reachable at all, this reaches it.
+
+  Serve it from the app (http://localhost:3000/ws-tool.html) rather than
+  opening the file directly — browsers restrict wss:// from file:// origins.
+
+  The token is never written to the log or the URL preview.
+-->
+<style>
+  :root {
+    --bg: #0f172a; --card-bg: #1e293b; --border: #334155;
+    --text: #e2e8f0; --muted: #94a3b8; --accent: #38bdf8;
+    --ok: #4ade80; --err: #f87171; --warn: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px 24px 40px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+  }
+  h1 { font-size: 19px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 12px; margin: 0 0 18px; }
+  .panel {
+    background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px; margin-bottom: 14px;
+  }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-bottom: 10px; }
+  .field { display: flex; flex-direction: column; gap: 5px; flex: 1 1 170px; min-width: 0; }
+  label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  input, select {
+    padding: 9px 11px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font-size: 13px; width: 100%;
+  }
+  input:focus, select:focus { outline: 2px solid var(--accent); }
+  button {
+    padding: 9px 16px; border-radius: 8px; border: none; cursor: pointer;
+    font-size: 13px; font-weight: 600; background: var(--accent); color: #041014;
+    white-space: nowrap;
+  }
+  button:hover { opacity: .9; }
+  button:disabled { opacity: .4; cursor: default; }
+  button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); font-weight: 500; }
+  button.ghost:hover { border-color: var(--accent); color: var(--accent); }
+  button.danger { background: var(--err); color: #1a0505; }
+  .url-preview {
+    font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--muted);
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px; overflow-wrap: anywhere; margin-top: 4px;
+  }
+  .status { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.connecting { background: var(--warn); animation: pulse 1s infinite; }
+  .dot.open { background: var(--ok); }
+  .dot.closed { background: var(--err); }
+  @keyframes pulse { 50% { opacity: .3; } }
+  #log {
+    background: #0b1220; border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px; height: 420px; overflow-y: auto;
+    font-family: ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.55;
+  }
+  .entry { padding: 5px 0; border-bottom: 1px solid rgba(51,65,85,.4); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .entry:last-child { border-bottom: none; }
+  .ts { color: #64748b; font-size: 10px; margin-right: 7px; }
+  .tag { font-weight: 700; margin-right: 6px; }
+  .sys .tag { color: var(--accent); }
+  .rx  .tag { color: var(--ok); }
+  .tx  .tag { color: var(--warn); }
+  .er  .tag { color: var(--err); }
+  .er { color: #fca5a5; }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 8px; line-height: 1.6; }
+  .counter { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>🔌 WebSocket Tester</h1>
+<p class="sub">
+  Runs in the browser on purpose — Node ignores the Windows system proxy, so a
+  <code>wss://</code> endpoint can fail from a script yet work fine here.
+</p>
+
+<div class="panel">
+  <div class="row">
+    <div class="field" style="flex:2 1 260px;">
+      <label for="baseUrl">Base URL</label>
+      <input id="baseUrl" value="wss://api.benzinga.com/api/v1" />
+    </div>
+    <div class="field">
+      <label for="stream">Stream</label>
+      <select id="stream">
+        <option value="news">news (busiest — best for testing)</option>
+        <option value="bulls_bears_say">bulls_bears_say</option>
+        <option value="calendar/earnings">calendar/earnings</option>
+        <option value="calendar/ratings">calendar/ratings</option>
+        <option value="consensus_ratings">consensus_ratings</option>
+        <option value="transcripts">transcripts</option>
+        <option value="__custom__">— custom path —</option>
+      </select>
+    </div>
+    <div class="field" id="customPathField" style="display:none;">
+      <label for="customPath">Custom path</label>
+      <input id="customPath" placeholder="my/stream" />
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="field" style="flex:2 1 240px;">
+      <label for="token">Token</label>
+      <input id="token" type="password" placeholder="bz.xxxxxxxx" />
+    </div>
+    <div class="field" style="flex:0 0 auto;">
+      <label>&nbsp;</label>
+      <button class="ghost" id="toggleToken" type="button">Show</button>
+    </div>
+    <div class="field">
+      <label for="tickers">Tickers</label>
+      <input id="tickers" value="AAPL,TSLA" placeholder="AAPL,TSLA" />
+    </div>
+  </div>
+
+  <div class="url-preview" id="urlPreview">—</div>
+
+  <div class="row" style="margin-top:12px; margin-bottom:0;">
+    <button id="connectBtn">Connect</button>
+    <button id="disconnectBtn" class="danger" disabled>Disconnect</button>
+    <span class="status" style="margin-left:8px;">
+      <span class="dot" id="dot"></span><span id="statusText">Not connected</span>
+    </span>
+    <span class="counter" style="margin-left:auto;" id="counter">0 received</span>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="row" style="margin-bottom:0;">
+    <button class="ghost" id="pingBtn" disabled>Send "ping"</button>
+    <button class="ghost" id="replayBtn" disabled>Send "replay"</button>
+    <div class="field" style="flex:2 1 200px;">
+      <input id="customMsg" placeholder="custom message…" disabled />
+    </div>
+    <button class="ghost" id="sendBtn" disabled>Send</button>
+    <button class="ghost" id="clearBtn" style="margin-left:auto;">Clear log</button>
+  </div>
+  <p class="hint">
+    <strong>replay</strong> returns up to the last 100 cached messages — use it to prove
+    data is flowing, since most streams are quiet and silence looks like failure.
+    <strong>ping</strong> is the keepalive (send every 30-60s on a long-lived connection).
+  </p>
+</div>
+
+<div id="log"></div>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const els = {
+    baseUrl: $('baseUrl'), stream: $('stream'), customPath: $('customPath'),
+    customPathField: $('customPathField'), token: $('token'), tickers: $('tickers'),
+    urlPreview: $('urlPreview'), connect: $('connectBtn'), disconnect: $('disconnectBtn'),
+    ping: $('pingBtn'), replay: $('replayBtn'), send: $('sendBtn'), custom: $('customMsg'),
+    clear: $('clearBtn'), toggle: $('toggleToken'), dot: $('dot'),
+    statusText: $('statusText'), counter: $('counter'), log: $('log'),
+  };
+
+  let ws = null;
+  let received = 0;
+
+  // Remember non-secret settings between visits; never the token.
+  const SAVE_KEY = 'wsTool.settings';
+  try {
+    const s = JSON.parse(localStorage.getItem(SAVE_KEY) || '{}');
+    if (s.baseUrl) els.baseUrl.value = s.baseUrl;
+    if (s.stream) els.stream.value = s.stream;
+    if (s.tickers) els.tickers.value = s.tickers;
+  } catch (e) { /* ignore malformed saved state */ }
+
+  function saveSettings() {
+    localStorage.setItem(SAVE_KEY, JSON.stringify({
+      baseUrl: els.baseUrl.value, stream: els.stream.value, tickers: els.tickers.value,
+    }));
+  }
+
+  function currentPath() {
+    return els.stream.value === '__custom__' ? els.customPath.value.trim() : els.stream.value;
+  }
+
+  function buildUrl(mask) {
+    const base = els.baseUrl.value.replace(/\/+$/, '');
+    const path = currentPath();
+    // Trim whitespace — a trailing space from copy/paste silently breaks auth.
+    const token = els.token.value.trim();
+    const tickers = els.tickers.value.trim();
+    let url = `${base}/${path}/stream?token=${mask ? '***REDACTED***' : encodeURIComponent(token)}`;
+    if (tickers) url += `&tickers=${encodeURIComponent(tickers)}`;
+    return url;
+  }
+
+  function refreshPreview() {
+    els.customPathField.style.display = els.stream.value === '__custom__' ? 'flex' : 'none';
+    els.urlPreview.textContent = buildUrl(true);
+    saveSettings();
+  }
+
+  ['baseUrl', 'stream', 'customPath', 'tickers'].forEach((k) =>
+    els[k].addEventListener('input', refreshPreview)
+  );
+  els.stream.addEventListener('change', refreshPreview);
+  refreshPreview();
+
+  els.toggle.addEventListener('click', () => {
+    const showing = els.token.type === 'text';
+    els.token.type = showing ? 'password' : 'text';
+    els.toggle.textContent = showing ? 'Show' : 'Hide';
+  });
+
+  function log(kind, tag, text) {
+    const div = document.createElement('div');
+    div.className = 'entry ' + kind;
+    const ts = new Date().toTimeString().slice(0, 8);
+    div.innerHTML = `<span class="ts">${ts}</span><span class="tag">${tag}</span>`;
+    div.appendChild(document.createTextNode(text));
+    els.log.appendChild(div);
+    els.log.scrollTop = els.log.scrollHeight;
+  }
+
+  function setStatus(state, text) {
+    els.dot.className = 'dot ' + state;
+    els.statusText.textContent = text;
+  }
+
+  function setConnected(on) {
+    els.connect.disabled = on;
+    els.disconnect.disabled = !on;
+    [els.ping, els.replay, els.send, els.custom].forEach((b) => (b.disabled = !on));
+  }
+
+  // Plain-English meanings for the close codes you'll actually hit.
+  function explainClose(code) {
+    switch (code) {
+      case 1000: return 'Normal closure.';
+      case 1006:
+        return 'Abnormal closure — no close frame received. Usually a rejected token, ' +
+               'a stream not included in your licence, or a proxy/firewall block. ' +
+               'Check the token has no trailing space.';
+      case 1008: return 'Policy violation — typically auth rejected.';
+      case 1011: return 'Server error.';
+      case 4001:
+      case 4003: return 'Auth/permission failure — token invalid or stream not licensed.';
+      default: return '';
+    }
+  }
+
+  els.connect.addEventListener('click', () => {
+    if (!els.token.value.trim()) { log('er', '[ERR]', 'Token is empty.'); return; }
+    if (!currentPath()) { log('er', '[ERR]', 'Stream path is empty.'); return; }
+
+    // Warn about the classic Windows `set VAR=x && cmd` trailing-space bug.
+    if (els.token.value !== els.token.value.trim()) {
+      log('sys', '[SYS]', 'Note: token had surrounding whitespace — trimmed automatically.');
+    }
+
+    const url = buildUrl(false);
+    log('sys', '[SYS]', 'Connecting to ' + buildUrl(true));
+    setStatus('connecting', 'Connecting…');
+
+    try {
+      ws = new WebSocket(url);
+    } catch (e) {
+      log('er', '[ERR]', 'Could not create WebSocket: ' + e.message);
+      setStatus('closed', 'Failed');
+      return;
+    }
+
+    ws.onopen = () => {
+      setStatus('open', 'Connected');
+      setConnected(true);
+      log('sys', '[SYS]', '✓ Connection open. Streams are often quiet — click "Send replay" to pull cached messages.');
+    };
+
+    ws.onmessage = (e) => {
+      received++;
+      els.counter.textContent = received + ' received';
+      let out = e.data;
+      try { out = JSON.stringify(JSON.parse(e.data), null, 2); } catch (err) { /* not JSON */ }
+      log('rx', '[RECV]', out);
+    };
+
+    ws.onerror = () => {
+      // Browser error events carry no detail by design; the close code has it.
+      log('er', '[ERR]', 'Connection error (see close code below for the reason).');
+    };
+
+    ws.onclose = (e) => {
+      setStatus('closed', 'Closed (' + e.code + ')');
+      setConnected(false);
+      const why = explainClose(e.code);
+      log('er', '[CLOSE]', `code=${e.code}${e.reason ? ' reason=' + e.reason : ''}${why ? '\n' + why : ''}`);
+      ws = null;
+    };
+  });
+
+  els.disconnect.addEventListener('click', () => {
+    if (ws) { log('sys', '[SYS]', 'Closing…'); ws.close(1000, 'user disconnect'); }
+  });
+
+  function send(msg) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { log('er', '[ERR]', 'Not connected.'); return; }
+    ws.send(msg);
+    log('tx', '[SENT]', msg);
+  }
+
+  els.ping.addEventListener('click', () => send('ping'));
+  els.replay.addEventListener('click', () => send('replay'));
+  els.send.addEventListener('click', () => {
+    const m = els.custom.value.trim();
+    if (m) { send(m); els.custom.value = ''; }
+  });
+  els.custom.addEventListener('keydown', (e) => { if (e.key === 'Enter') els.send.click(); });
+  els.clear.addEventListener('click', () => { els.log.innerHTML = ''; received = 0; els.counter.textContent = '0 received'; });
+
+  log('sys', '[SYS]', 'Ready. Enter your token and click Connect.');
+  if (location.protocol === 'file:') {
+    log('er', '[WARN]', 'Opened as a file:// page — browsers block wss:// from this origin. Serve it instead: npm start, then open http://localhost:3000/ws-tool.html');
+  }
+})();
+</script>
+</body>
+</html>
