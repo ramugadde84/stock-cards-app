@@ -14,6 +14,17 @@ A small local web app with two views, switched from the menu at the top:
   time. Click "+ Add 10-day chart to Search" on any card to pull it into
   the Search view with full 10-day detail.
 
+- **🔥 Movers** — scans S&P 500 tickers and lists only the ones actually
+  moving. **Defaults to 🌙 After-hours**, which stays pinned to the
+  post-market tape whatever the clock says — so last night's earnings
+  reaction is still there when you check at 9am. Switch to 🌅 Pre-market,
+  ☀️ Regular, or 🕒 Auto (follow whichever session is live). Pick **Top 100**
+  (~100 tickers, a few seconds) or **Full S&P 500** (~500, slower), set a
+  minimum move (default 1%), and hit **Scan now**. Gainers and losers show
+  side by side, biggest move first; click any row to open it in Search.
+  Prints from an earlier session are labelled with their age rather than
+  passed off as live. See "Movers — how the session is chosen" below.
+
 - **🏷️ Coupons** — look up promo codes a merchant has published to an
   affiliate network, plus a local tracker for saving codes you find
   anywhere and recording whether they actually worked. See
@@ -191,6 +202,89 @@ your licence doesn't cover. The script explains the common codes rather than
 leaving you with a bare number, and it redacts the token from its own output
 so you can paste terminal logs safely.
 
+## Movers — how the session is chosen
+
+`movers.js` scans a ticker list and returns only names moving more than your
+threshold **in the session you asked for**. That distinction is the whole
+point of the module. Yahoo carries three separate change figures per ticker,
+and reading the wrong one gives you a confidently wrong answer at exactly the
+moment you care: at 6pm, `regularMarketChangePercent` is the 3pm close, not
+the earnings reaction you opened the tab to see.
+
+### Forcing after-hours (the default)
+
+`session=post` pins the scan to the post-market figure **regardless of the
+clock**. This is deliberate. Auto-mode is correct in the evening, but at 9am
+it switches to the pre-market tape — and if what you want is "which names
+moved on last night's earnings", auto quietly gives you a different number.
+Forcing the session means you always know which tape you're reading.
+
+The trade-off: if you force after-hours at 11am, most tickers have no
+post-market print at all. Those are counted as `noFigure`, and the status
+line says "no after-hours price yet (market is currently market open)" rather
+than the misleading "nothing is moving".
+
+**Stale prints are labelled, not hidden.** Force after-hours at 9am and the
+data is real but ~14 hours old. Each row carries `ageMins`, and anything past
+4 hours (`MOVERS_STALE_MINS`) gets a `⏱ 14h old` badge. Dropping those rows
+would be worse — last night's move is usually the thing you're looking for —
+but presenting them as live movement would be a lie.
+
+### Session → figure mapping (`session=auto`)
+
+Auto reads `marketState` and picks to match:
+
+| `marketState`    | Figure used                 | Shown as      |
+|------------------|-----------------------------|---------------|
+| `PRE` / `PREPRE` | `preMarketChangePercent`    | pre-market    |
+| `POST`/`POSTPOST`| `postMarketChangePercent`   | after-hours   |
+| `REGULAR`        | `regularMarketChangePercent`| regular       |
+| `CLOSED`         | most recent extended print  | after-hours   |
+
+If Yahoo returns the prices but omits the percentage fields (it isn't
+consistent about this across symbols), the move is derived from the prices
+instead — extended-hours moves against the regular close, the regular move
+against the previous close. Without that fallback those tickers would just
+vanish from the scan, which looks identical to "it isn't moving."
+
+**The minimum move defaults to "Any move (all)"** — every ticker that moved
+at all is listed, biggest first, with no cap. Names printing exactly 0.00%
+are excluded and counted separately as `flat`, because a stock that didn't
+move isn't a mover; without that the list would just be the universe again.
+
+Raise the threshold only when the list gets noisy. In quiet extended hours a
+lot of names print ±0.05% on almost no volume, and at that point 1–3% makes
+the real moves easier to see. Either way `quoted`, `flat` and `moversFound`
+are all reported, so "0 movers" reads as a quiet tape rather than a broken
+scan. If a list ever is cut short, `truncated` is set and the status line
+says so — it will not silently show you a top-30 and call it everything.
+
+**Why it takes a few seconds.** Yahoo's batch quote endpoint now generally
+wants a session crumb, which is brittle to reproduce, so this uses the chart
+endpoint — one request per ticker, issued 25 at a time with a short pause.
+Top 100 is the default for that reason; the full 500 works but is slower.
+Tune with `MOVERS_BATCH_SIZE` and `MOVERS_BATCH_PAUSE` if you want.
+
+**The ticker list drifts.** `sp500.js` is a snapshot. Index membership changes
+several times a year, so it will gradually go stale. Fine for "what's moving
+tonight"; not an authoritative constituent list. Replace the array to refresh.
+
+Endpoint:
+`GET /api/movers?universe=top100|sp500&session=post|pre|regular|auto&minMove=1&limit=30`
+
+`minMove=0` means "everything that moved"; `limit=500` means no cap.
+
+Response fields worth knowing: `session` (what you asked for) vs
+`marketState` (what's actually live), `quoted`, `noFigure` (no print for that
+session), `flat` (quoted but unchanged), `moversFound`, `staleCount`,
+`truncated`, `failed`.
+
+Offline tests (no network needed): `node movers-test.js` — 64 checks covering
+forced sessions, the no-data-for-this-session case, staleness flagging,
+zero-threshold "all movers" behaviour, flat-ticker exclusion, truncation
+reporting, session picking, the derived-percentage fallback, sorting,
+partial failures, and bad input.
+
 ## Coupons — what this can and can't do
 
 **The honest summary: there is no legitimate, general way to write code that
@@ -212,20 +306,58 @@ dates — to affiliate networks. That's the merchant as the source of truth,
 which is far more reliable than crowd-sourced coupon-site listings. The app
 queries one of those networks and filters out anything already expired.
 
-To enable it, register as a publisher (free, but there's a manual approval
-step) with one of:
+### Step-by-step: turning the lookup on (Rakuten, the default)
 
-- [Rakuten Advertising](https://rakutenadvertising.com/) — default
-- [Impact](https://impact.com/)
-- [Awin](https://www.awin.com/) (now includes ShareASale)
+This is the only part that needs setup, and the approval step is the slow
+bit — usually a few days, and applications do get rejected.
 
-then start the server with your token:
+1. **Register as a publisher** at
+   [signup.linkshare.com](https://signup.linkshare.com/publishers/registration/landing?ls-locale=us&host=linkshare).
+   You'll be asked for the site or app that will show the offers. This is a
+   real review, not a formality — "personal project" applications are
+   sometimes declined, and there's no way around that from the code side.
 
-```bash
-COUPON_API_TOKEN=your_token_here npm start
-# or to use a different network:
-COUPON_PROVIDER=impact COUPON_API_TOKEN=your_token_here npm start
-```
+2. **Apply to individual advertisers.** This is the part most people miss:
+   an approved publisher account gets you into the network, but the coupon
+   feed only ever contains merchants you have an *approved partnership with*.
+   A brand-new account with zero partnerships returns an empty feed — which
+   is working correctly, just empty. Apply to the specific stores you care
+   about from the Advertisers tab and wait for each to approve you.
+
+3. **Create an API credential** in the
+   [Developer Portal](https://developers.rakutenadvertising.com/) →
+   Account → Applications. Copy the **Client ID** and **Client Secret**.
+   Then get your **SID** from the top right of the publisher dashboard —
+   this is a different value from the Client ID, and mixing them up is the
+   usual cause of a 401.
+
+4. **Put all three in `.env`** next to `server.js`:
+
+   ```
+   COUPON_PROVIDER=rakuten
+   COUPON_CLIENT_ID=your_client_id
+   COUPON_CLIENT_SECRET=your_client_secret
+   COUPON_SCOPE_ID=your_sid
+   ```
+
+   No quotes, no spaces around `=`, no trailing space (values are trimmed
+   defensively anyway). Then `npm start`.
+
+   Rakuten doesn't issue a permanent API key — those three are exchanged for
+   a short-lived bearer token at `api.linksynergy.com/token`. The app does
+   that automatically, caches the token, refreshes it a minute before expiry,
+   collapses concurrent requests into a single exchange, and retries once if
+   a token dies mid-request. You set it up once and don't think about it
+   again. `COUPON_API_TOKEN` still works if you'd rather paste a token
+   directly, but it will expire and can't be refreshed.
+
+5. **Search a store** in the 🏷️ Coupons tab. If you aren't partnered with
+   that merchant, the app now says so explicitly and lists the merchants you
+   *do* have available, rather than showing a bare empty result.
+
+Other supported networks: set `COUPON_PROVIDER=impact` or `awin` with the
+matching token — [Impact](https://impact.com/),
+[Awin](https://www.awin.com/) (which now includes ShareASale).
 
 Without a token the app doesn't error — the lookup box just reports that it
 isn't configured, and everything else keeps working.
@@ -242,13 +374,46 @@ your machine.
 "guaranteed to work." Codes are often restricted by product, minimum spend,
 region, or first-time-customer status. The UI says this too.
 
-**One implementation note:** the three network adapters in `coupons.js`
-follow each network's published API docs, but a live publisher token is
-needed to exercise them and I didn't have one — so expect to adjust field
-names on your first real run. The code is defensive about it (it logs the
-raw response shape to the server console when parsing fails, and normalises
-across several possible field names per value), but it's the part most
-likely to need a tweak.
+### Why scraping coupon sites isn't the answer
+
+The obvious idea is to scrape RetailMeNot, Honey, Slickdeals and so on. Worth
+knowing why that's a dead end before spending a weekend on it:
+
+- **Their terms of service prohibit it**, and the big ones sit behind
+  commercial bot protection that blocks datacenter IPs and headless browsers.
+- **The codes there are mostly dead anyway.** Those sites are crowd-sourced
+  and monetised by traffic, so expired and never-worked codes stay up. You'd
+  be scraping a pile you then still can't verify.
+- **Verification is the actual hard part, and it's unsolvable in general.**
+  The only true test is applying the code at that retailer's checkout — which
+  is different on every store, prohibited by most, and indistinguishable from
+  card-testing fraud from the retailer's security team's point of view.
+
+The affiliate feed avoids all three: the merchant publishes it deliberately,
+it comes with real start/end dates, and using it is the intended purpose.
+
+### Implementation notes on the adapters
+
+The Rakuten adapter is written against Rakuten's published Coupon Feed API
+docs, including two things that are easy to get wrong:
+
+- **The feed is XML, not JSON.** Their docs state it plainly ("currently
+  supports only XML format, maximum 500 results"). `coupons.js` has a small
+  purpose-built parser for it; `node coupons-test.js` exercises that parser
+  offline against a realistic document with CDATA, escaped ampersands,
+  nested category blocks, code-less promotional links and an expired offer.
+- **There's no store-name search parameter.** The documented filters are
+  category, promotion type, network and advertiser ID. So the app pulls the
+  feed and matches on merchant name locally.
+- **Auth is OAuth client-credentials, not an API key.** Covered by
+  `node coupons-token-test.js` — request shape, caching, single-flight under
+  concurrency, refresh before expiry, one-shot retry on a 401, and a check
+  that the client secret never reaches an error message.
+
+The Impact and Awin adapters follow their networks' docs but have **not**
+been verified — a live publisher token for each is needed to exercise them,
+and I don't have one. Expect to adjust field names on first run; the code
+logs the raw response shape to the server console when parsing fails.
 
 ## Deploying online (so you can access it from anywhere, not just localhost)
 

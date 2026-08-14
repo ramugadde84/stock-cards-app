@@ -30,7 +30,10 @@ const menuBtns = document.querySelectorAll('.menu-btn');
 const views = {
   search: document.getElementById('searchView'),
   earnings: document.getElementById('earningsView'),
+  movers: document.getElementById('moversView'),
   macro: document.getElementById('macroView'),
+  average: document.getElementById('averageView'),
+  planner: document.getElementById('plannerView'),
   coupons: document.getElementById('couponsView'),
 };
 
@@ -214,7 +217,191 @@ function renderCard(card, data) {
   attachReactionButton(card, data.ticker, { autoTrack: false });
   attachBenzingaButton(card, data.ticker);
   attachMonthEarningsButton(card, data.ticker);
+  attachNewsButton(card, data.ticker);
+  attachOptionsButton(card, data.ticker);
   attachAiButton(card, data.ticker);
+}
+
+// ============================================================================
+// OPTIONS FLOW — top calls & puts by premium
+// ============================================================================
+
+function attachOptionsButton(card, ticker) {
+  const slot = document.createElement('div');
+  slot.className = 'bz-slot';
+
+  const btn = document.createElement('button');
+  btn.className = 'bz-btn';
+  btn.textContent = '⚡ Top options flow';
+
+  card.appendChild(btn);
+  card.appendChild(slot);
+
+  let expanded = false;
+
+  btn.addEventListener('click', async () => {
+    if (expanded) {
+      expanded = false;
+      slot.innerHTML = '';
+      btn.textContent = '⚡ Top options flow';
+      return;
+    }
+
+    expanded = true;
+    btn.textContent = 'Loading…';
+    slot.innerHTML = '<div class="bz-box">Loading options flow…</div>';
+
+    try {
+      const res = await fetch(`/api/options/${encodeURIComponent(ticker)}?limit=10`);
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || 'Request failed');
+      renderOptionsFlow(slot, d);
+      btn.textContent = '⚡ Hide options';
+    } catch (err) {
+      slot.innerHTML = `<div class="bz-box"><span class="error-msg">⚠️ ${escapeHtml(err.message)}</span></div>`;
+      btn.textContent = '⚡ Hide options';
+    }
+  });
+}
+
+function renderOptionsFlow(slot, d) {
+  if (!d.configured) {
+    slot.innerHTML = `<div class="bz-box"><div class="bz-note">${escapeHtml(d.note)}</div></div>`;
+    return;
+  }
+  if (!d.totalTrades) {
+    slot.innerHTML = `<div class="bz-box"><div class="bz-note">No options activity found for ${escapeHtml(d.ticker)} in the last week.</div></div>`;
+    return;
+  }
+
+  // Be explicit about freshness. Options don't trade outside 09:30-16:00 ET,
+  // so outside those hours this is necessarily the last session's flow.
+  const freshness = d.marketOpen
+    ? '<span class="live-dot">● LIVE</span> options market open'
+    : `market closed — showing last session${d.latestTradeStamp ? ' (' + escapeHtml(d.latestTradeStamp) + ')' : ''}`;
+
+  const side = (list, kind) => {
+    if (!list.length) return `<div class="bz-note">No ${kind}s.</div>`;
+    return list
+      .map((t, i) => {
+        const sweep = /sweep/i.test(t.activityType || '')
+          ? '<span class="sweep-badge">SWEEP</span>' : '';
+        return `
+          <div class="opt-row">
+            <span class="opt-rank">#${i + 1}</span>
+            <span class="opt-strike">$${fmt(t.strike)}</span>
+            <span class="opt-exp">${escapeHtml(t.expiry || '')}</span>
+            <span class="opt-prem">${fmtBig(t.premium)}</span>
+            <span class="opt-vol">v${t.volume ?? '—'}/oi${t.openInterest ?? '—'}</span>
+            ${sweep}
+          </div>`;
+      })
+      .join('');
+  };
+
+  const skew = d.premiumSkew || {};
+  const skewLabel =
+    skew.leaning === 'calls' ? '<span class="pos">call-heavy</span>'
+    : skew.leaning === 'puts' ? '<span class="neg">put-heavy</span>'
+    : 'balanced';
+
+  slot.innerHTML = `
+    <div class="bz-box">
+      <div class="bz-meta">${freshness}</div>
+      <div class="reaction-row">
+        <span>Premium skew</span>
+        <span>${skewLabel} · calls ${fmtBig(skew.callPremium)} vs puts ${fmtBig(skew.putPremium)}</span>
+      </div>
+
+      <div class="bz-section-title" style="margin-top:10px;">🟢 Top calls by premium</div>
+      ${side(d.calls, 'call')}
+
+      <div class="bz-section-title" style="margin-top:10px;">🔴 Top puts by premium</div>
+      ${side(d.puts, 'put')}
+
+      <div class="reaction-disclaimer">
+        Ranked by premium (total dollars), not contract count — a big-dollar trade signals
+        more conviction than many cheap contracts. Large flow shows what someone bet, not
+        whether they were right, and could equally be a hedge. Not advice.
+      </div>
+    </div>`;
+}
+
+// ============================================================================
+// BENZINGA WIRE NEWS — per ticker
+// ============================================================================
+// The wire is where Benzinga's speed advantage lives: stories land here the
+// moment they cross, ahead of aggregators like Yahoo.
+
+function attachNewsButton(card, ticker) {
+  const slot = document.createElement('div');
+  slot.className = 'bz-slot';
+
+  const btn = document.createElement('button');
+  btn.className = 'bz-btn';
+  btn.textContent = '📰 Latest news (wire)';
+
+  card.appendChild(btn);
+  card.appendChild(slot);
+
+  let expanded = false;
+
+  btn.addEventListener('click', async () => {
+    if (expanded) {
+      expanded = false;
+      slot.innerHTML = '';
+      btn.textContent = '📰 Latest news (wire)';
+      return;
+    }
+
+    expanded = true;
+    btn.textContent = 'Loading…';
+    slot.innerHTML = '<div class="bz-box">Loading wire news…</div>';
+
+    try {
+      const res = await fetch(`/api/news/${encodeURIComponent(ticker)}?limit=15`);
+      const d = await res.json();
+      if (!res.ok) throw new Error(d.error || 'Request failed');
+
+      if (!d.configured) {
+        slot.innerHTML = `<div class="bz-box"><div class="bz-note">${escapeHtml(d.note)}</div></div>`;
+      } else if (!d.stories.length) {
+        slot.innerHTML = `<div class="bz-box"><div class="bz-note">No recent news for ${escapeHtml(ticker)}.</div></div>`;
+      } else {
+        slot.innerHTML = `
+          <div class="bz-box">
+            <div class="bz-meta">${d.count} recent stor${d.count === 1 ? 'y' : 'ies'}</div>
+            ${d.stories.map(newsRow).join('')}
+          </div>`;
+      }
+      btn.textContent = '📰 Hide news';
+    } catch (err) {
+      slot.innerHTML = `<div class="bz-box"><span class="error-msg">⚠️ ${escapeHtml(err.message)}</span></div>`;
+      btn.textContent = '📰 Hide news';
+    }
+  });
+}
+
+function newsRow(n) {
+  const when = n.created
+    ? new Date(n.created).toLocaleString('en-US', {
+        month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+      })
+    : '';
+  // Wire stories are the fast ones — badge them so it's obvious which
+  // arrived straight off the newswire versus a written-up article.
+  const wire = n.isWire ? '<span class="wire-badge">WIRE</span>' : '';
+  const chans = n.channels?.length
+    ? `<span class="news-chan">${escapeHtml(n.channels.slice(0, 2).join(' · '))}</span>`
+    : '';
+
+  return `
+    <div class="bz-earn-entry">
+      <div class="bz-earn-head">${escapeHtml(when)} ${wire} ${chans}</div>
+      <div class="coupon-meta">${escapeHtml(n.title)}</div>
+      ${n.teaser ? `<div class="news-teaser">${escapeHtml(n.teaser.slice(0, 220))}${n.teaser.length > 220 ? '…' : ''}</div>` : ''}
+      ${n.url ? `<div class="card-footer"><a href="${escapeHtml(n.url)}" target="_blank" rel="noopener noreferrer">Read →</a></div>` : ''}
+    </div>`;
 }
 
 // ============================================================================
@@ -354,10 +541,56 @@ function renderMonthEarnings(slot, d) {
     return;
   }
 
-  // No earnings this month is the normal case for most tickers — say so
-  // plainly rather than showing an empty box.
+  // No earnings this month is normal for most tickers — but "the API
+  // returned nothing at all" and "the API returned rows, just not this
+  // month" are very different problems, so distinguish them rather than
+  // showing one ambiguous message.
   if (!d.found) {
-    slot.innerHTML = `<div class="bz-box"><div class="bz-note">No earnings for ${escapeHtml(d.ticker)} in ${escapeHtml(d.monthLabel)}.</div></div>`;
+    const g = d.diagnostics || {};
+    let detail = '';
+    if (g.rowsReturned === 0) {
+      detail =
+        `<div class="bz-note" style="margin-top:6px;">Benzinga returned no earnings rows at all for this ticker — ` +
+        `that usually means the earnings dataset isn't in your licence, or the symbol isn't covered.</div>`;
+    } else if (g.datesReturned?.length) {
+      detail =
+        `<div class="bz-note" style="margin-top:6px;">Benzinga returned ${g.rowsReturned} row(s), but dated ` +
+        `${escapeHtml(g.datesReturned.join(', '))} — none inside ${escapeHtml(g.monthFilter || '')}.</div>`;
+    }
+    slot.innerHTML =
+      `<div class="bz-box"><div class="bz-note">No earnings for ${escapeHtml(d.ticker)} in ${escapeHtml(d.monthLabel)}.</div>${detail}</div>`;
+    if (g.rowsReturned !== undefined) console.log(`[earnings-month] ${d.ticker} diagnostics:`, g);
+    return;
+  }
+
+  // Benzinga news-wire path: the release itself, which lands minutes after
+  // the wire crosses — the fastest source available here.
+  if (d.source === 'benzinga-news' && d.newsReleases?.length) {
+    const items = d.newsReleases
+      .map((n) => {
+        const when = n.created
+          ? new Date(n.created).toLocaleString('en-US', {
+              month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+            })
+          : '';
+        return `
+          <div class="bz-earn-entry">
+            <div class="bz-earn-head">${escapeHtml(when)} <span class="wire-badge">BZ WIRE</span></div>
+            <div class="coupon-meta">${escapeHtml(n.title)}</div>
+            ${n.url ? `<div class="card-footer"><a href="${escapeHtml(n.url)}" target="_blank" rel="noopener noreferrer">Read release →</a></div>` : ''}
+          </div>`;
+      })
+      .join('');
+    slot.innerHTML = `
+      <div class="bz-box">
+        <div class="bz-meta">${escapeHtml(d.monthLabel)} · from Benzinga's news wire</div>
+        ${items}
+        <div class="reaction-disclaimer">
+          The calendar endpoint only carries scheduled dates and estimates, so results come
+          from the wire instead — that's also the fastest source. Use <strong>🤖 AI analysis</strong>
+          to pull the EPS and revenue figures out of the release.
+        </div>
+      </div>`;
     return;
   }
 
@@ -1016,6 +1249,27 @@ const couponStatus = document.getElementById('couponStatus');
 const saveCouponForm = document.getElementById('saveCouponForm');
 const savedGrid = document.getElementById('savedGrid');
 
+/**
+ * Show the lookup box only when the server actually has a token. Offering a
+ * search that can only ever answer "not configured" reads as a broken app —
+ * it isn't broken, it just has no data source, and the UI should say which.
+ */
+async function initCouponLookup() {
+  const lookup = document.getElementById('couponLookup');
+  const setup = document.getElementById('couponSetup');
+  try {
+    const res = await fetch('/api/coupons/status');
+    const { configured } = await res.json();
+    lookup.classList.toggle('hidden', !configured);
+    setup.classList.toggle('hidden', configured);
+  } catch (e) {
+    // Server unreachable: show the explainer rather than a dead search box.
+    lookup.classList.add('hidden');
+    setup.classList.remove('hidden');
+  }
+}
+initCouponLookup();
+
 couponForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const store = storeInput.value.trim();
@@ -1287,6 +1541,504 @@ async function loadMacroCalendar() {
 }
 
 document.getElementById('macroRefresh').addEventListener('click', loadMacroCalendar);
+
+// ============================================================================
+// AVERAGE-DOWN CALCULATOR
+// ============================================================================
+// Pure arithmetic, entirely client-side. Nothing leaves the browser.
+//
+// THE MATH
+//   You hold N shares at average cost C.  You buy X more at price P.
+//   New average  A = (N·C + X·P) / (N + X)
+//   Solving for X given a target average T:
+//       T(N + X) = N·C + X·P
+//       X(T − P) = N(C − T)
+//       X = N(C − T) / (T − P)
+//
+// THE IMPORTANT PROPERTY: as T approaches P, the denominator approaches zero
+// and X goes to INFINITY. You can never average all the way down to the
+// current price by buying at that price — only get asymptotically closer.
+// That's why the tool refuses impossible targets instead of printing a
+// gigantic number, and why it also shows a table of realistic buy sizes.
+
+const avgEls = {
+  ticker: document.getElementById('avgTicker'),
+  shares: document.getElementById('avgShares'),
+  cost: document.getElementById('avgCost'),
+  price: document.getElementById('avgPrice'),
+  target: document.getElementById('avgTarget'),
+  result: document.getElementById('avgResult'),
+  fetchPrice: document.getElementById('avgFetchPrice'),
+};
+
+['shares', 'cost', 'price', 'target'].forEach((k) => {
+  avgEls[k]?.addEventListener('input', renderAverageCalc);
+});
+
+// Convenience: pull the live price straight from the app's own stock route.
+avgEls.fetchPrice?.addEventListener('click', async () => {
+  const t = (avgEls.ticker.value || '').trim().toUpperCase();
+  if (!t) return;
+  avgEls.fetchPrice.textContent = '…';
+  try {
+    const res = await fetch(`/api/stock/${encodeURIComponent(t)}`);
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || 'Lookup failed');
+    if (typeof d.currentPrice === 'number') {
+      avgEls.price.value = d.currentPrice;
+      renderAverageCalc();
+    }
+  } catch (e) {
+    avgEls.result.innerHTML = `<div class="calc-warn">⚠️ ${escapeHtml(e.message)}</div>`;
+  } finally {
+    avgEls.fetchPrice.textContent = 'Use live price';
+  }
+});
+
+function renderAverageCalc() {
+  const N = parseFloat(avgEls.shares.value);
+  const C = parseFloat(avgEls.cost.value);
+  const P = parseFloat(avgEls.price.value);
+  const Traw = parseFloat(avgEls.target.value);
+
+  if (!(N > 0) || !(C > 0) || !(P > 0)) {
+    avgEls.result.innerHTML =
+      '<div class="calc-hint">Enter shares owned, your average cost, and the current price.</div>';
+    return;
+  }
+
+  const currentValue = N * P;
+  const currentCost = N * C;
+  const unrealised = currentValue - currentCost;
+  const unrealisedPct = (unrealised / currentCost) * 100;
+
+  const parts = [];
+
+  parts.push(`
+    <div class="calc-block">
+      <div class="calc-block-title">Position now</div>
+      <div class="reaction-row"><span>${N} shares @ avg</span><span>$${fmt(C)}</span></div>
+      <div class="reaction-row"><span>Cost basis</span><span>$${fmt(currentCost)}</span></div>
+      <div class="reaction-row"><span>Market value @ $${fmt(P)}</span><span>$${fmt(currentValue)}</span></div>
+      <div class="reaction-row"><span>Unrealised</span>
+        <span class="${unrealised >= 0 ? 'pos' : 'neg'}">
+          ${unrealised >= 0 ? '+' : ''}$${fmt(unrealised)} (${unrealised >= 0 ? '+' : ''}${fmt(unrealisedPct)}%)
+        </span></div>
+    </div>`);
+
+  // --- Target-average solve -------------------------------------------------
+  if (Number.isFinite(Traw) && Traw > 0) {
+    if (P >= C) {
+      parts.push(`<div class="calc-warn">
+        The current price ($${fmt(P)}) is at or above your average ($${fmt(C)}), so buying more
+        would raise your average, not lower it.</div>`);
+    } else if (Traw <= P) {
+      // The asymptote. Worth explaining rather than just rejecting.
+      parts.push(`<div class="calc-warn">
+        <strong>That target isn't reachable.</strong> Buying at $${fmt(P)} can only pull your average
+        <em>toward</em> $${fmt(P)}, never to it or below — the required share count grows without
+        limit as the target approaches the purchase price.
+        Pick a target above $${fmt(P)} (and below your current $${fmt(C)}).</div>`);
+    } else if (Traw >= C) {
+      parts.push(`<div class="calc-warn">
+        Your average is already $${fmt(C)}, which is below that target — nothing to do.</div>`);
+    } else {
+      // Always whole shares, rounded UP — so the resulting average lands
+      // slightly below the target rather than above it.
+      const X = (N * (C - Traw)) / (Traw - P);
+      const shares = Math.ceil(X);
+      const cost = shares * P;
+      const actualAvg = (N * C + shares * P) / (N + shares);
+
+      parts.push(`
+        <div class="calc-block highlight">
+          <div class="calc-block-title">To reach a $${fmt(Traw)} average</div>
+          <div class="calc-big">Buy ${shares.toLocaleString()} shares</div>
+          <div class="reaction-row"><span>Cost to buy @ $${fmt(P)}</span><span>$${fmt(cost)}</span></div>
+          <div class="reaction-row"><span>Your new average</span><span>$${fmt(actualAvg)}</span></div>
+          <div class="reaction-row"><span>Total position</span><span>${(N + shares).toLocaleString()} shares · $${fmt(currentCost + cost)}</span></div>
+        </div>`);
+    }
+  }
+
+  // --- "What if I buy X" table ---------------------------------------------
+  // More useful than a single target in practice: shows what your money
+  // actually buys you, and makes the diminishing returns obvious.
+  if (P < C) {
+    const steps = [
+      Math.ceil(N * 0.25), Math.ceil(N * 0.5), N,
+      N * 2, N * 3, N * 5, N * 10,
+    ].filter((v, i, a) => v > 0 && a.indexOf(v) === i);
+
+    const rows = steps
+      .map((x) => {
+        const newAvg = (N * C + x * P) / (N + x);
+        const spend = x * P;
+        const dropPct = ((C - newAvg) / C) * 100;
+        return `<tr>
+          <td>${x.toLocaleString()}</td>
+          <td>$${fmt(spend)}</td>
+          <td>$${fmt(newAvg)}</td>
+          <td class="pos">−${fmt(dropPct)}%</td>
+          <td>${(N + x).toLocaleString()}</td>
+        </tr>`;
+      })
+      .join('');
+
+    parts.push(`
+      <div class="calc-block">
+        <div class="calc-block-title">If you buy… (at $${fmt(P)})</div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Buy</th><th>Costs</th><th>New avg</th><th>Avg drop</th><th>Total shares</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+        <div class="calc-note">Notice the diminishing returns — each additional block of shares
+        moves the average less than the one before, because the average can only approach
+        $${fmt(P)} asymptotically.</div>
+      </div>`);
+  }
+
+  parts.push(`<div class="reaction-disclaimer">
+    Arithmetic only — it shows what the numbers do, not whether buying more is a good idea.
+    Averaging down increases your exposure to a position that has fallen, which raises both
+    the potential gain and the potential loss. Not financial advice.
+  </div>`);
+
+  avgEls.result.innerHTML = parts.join('');
+}
+
+// ============================================================================
+// TRADE PLANNER — position sizing from risk
+// ============================================================================
+// WHY SIZE FROM RISK RATHER THAN FROM BUDGET
+//
+// "How many shares should I buy" has no answer from the price alone. The
+// number that actually determines it is how much you're prepared to lose if
+// the trade goes against you:
+//
+//     risk per share = entry − stop
+//     shares         = (max $ you'll risk) / (risk per share)
+//
+// A tight stop lets you buy more shares for the same dollar risk; a wide stop
+// forces fewer. That's the whole mechanism, and it's why the stop price is a
+// required input rather than an afterthought.
+
+const pEls = {
+  ticker: document.getElementById('pTicker'),
+  entry: document.getElementById('pEntry'),
+  up: document.getElementById('pTargetUp'),
+  stop: document.getElementById('pStop'),
+  risk: document.getElementById('pRisk'),
+  budget: document.getElementById('pBudget'),
+  result: document.getElementById('plannerResult'),
+  fetchPrice: document.getElementById('pFetchPrice'),
+};
+
+['entry', 'up', 'stop', 'risk', 'budget'].forEach((k) => {
+  pEls[k]?.addEventListener('input', renderPlanner);
+});
+
+pEls.fetchPrice?.addEventListener('click', async () => {
+  const t = (pEls.ticker.value || '').trim().toUpperCase();
+  if (!t) return;
+  pEls.fetchPrice.textContent = '…';
+  try {
+    const res = await fetch(`/api/stock/${encodeURIComponent(t)}`);
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || 'Lookup failed');
+    if (typeof d.currentPrice === 'number') {
+      pEls.entry.value = d.currentPrice;
+      renderPlanner();
+    }
+  } catch (e) {
+    pEls.result.innerHTML = `<div class="calc-warn">⚠️ ${escapeHtml(e.message)}</div>`;
+  } finally {
+    pEls.fetchPrice.textContent = 'Use live price';
+  }
+});
+
+function renderPlanner() {
+  const E = parseFloat(pEls.entry.value);
+  const U = parseFloat(pEls.up.value);
+  const S = parseFloat(pEls.stop.value);
+  const R = parseFloat(pEls.risk.value);
+  const B = parseFloat(pEls.budget.value);
+
+  if (!(E > 0)) {
+    pEls.result.innerHTML = '<div class="calc-hint">Enter an entry price to begin.</div>';
+    return;
+  }
+
+  const parts = [];
+
+  // Sanity checks — these catch inputs that would produce nonsense.
+  if (Number.isFinite(S) && S >= E) {
+    parts.push(`<div class="calc-warn">Your stop ($${fmt(S)}) must be <em>below</em> your
+      entry ($${fmt(E)}) — otherwise it isn't a stop loss.</div>`);
+  }
+  if (Number.isFinite(U) && U <= E) {
+    parts.push(`<div class="calc-warn">Your target ($${fmt(U)}) must be <em>above</em> your
+      entry ($${fmt(E)}) for a long position.</div>`);
+  }
+
+  const validStop = Number.isFinite(S) && S > 0 && S < E;
+  const validUp = Number.isFinite(U) && U > E;
+
+  if (validStop) {
+    const riskPerShare = E - S;
+    const rewardPerShare = validUp ? U - E : null;
+
+    // --- Size from risk ----------------------------------------------------
+    if (R > 0) {
+      let shares = Math.floor(R / riskPerShare);
+      let cappedBy = null;
+
+      // A budget cap can bind before the risk limit does.
+      if (B > 0 && shares * E > B) {
+        shares = Math.floor(B / E);
+        cappedBy = 'budget';
+      }
+
+      if (shares < 1) {
+        parts.push(`<div class="calc-warn">
+          At $${fmt(riskPerShare)} of risk per share, a $${fmt(R)} limit doesn't cover even one
+          share. Either widen the risk limit, or move the stop closer to your entry.</div>`);
+      } else {
+        const cost = shares * E;
+        const maxLoss = shares * riskPerShare;
+        const maxGain = rewardPerShare !== null ? shares * rewardPerShare : null;
+
+        parts.push(`
+          <div class="calc-block highlight">
+            <div class="calc-block-title">Position size</div>
+            <div class="calc-big">Buy ${shares.toLocaleString()} shares</div>
+            <div class="reaction-row"><span>Cost at $${fmt(E)}</span><span>$${fmt(cost)}</span></div>
+            <div class="reaction-row"><span>Risk per share</span><span>$${fmt(riskPerShare)} (entry − stop)</span></div>
+            <div class="reaction-row"><span>Max loss if stopped at $${fmt(S)}</span><span class="neg">−$${fmt(maxLoss)}</span></div>
+            ${maxGain !== null ? `<div class="reaction-row"><span>Gain if target $${fmt(U)} hits</span><span class="pos">+$${fmt(maxGain)}</span></div>` : ''}
+            ${cappedBy ? `<div class="calc-note">Limited by your $${fmt(B)} spend cap, not the risk
+              limit — actual risk here is only $${fmt(maxLoss)}.</div>` : ''}
+          </div>`);
+      }
+    } else {
+      parts.push(`<div class="calc-hint">Add "Max you'll risk ($)" to get a share count.</div>`);
+    }
+
+    // --- Risk / reward -----------------------------------------------------
+    if (validUp) {
+      const rr = (U - E) / (E - S);
+      // With a reward:risk of R, you need to win more than 1/(1+R) of the
+      // time just to break even. This is the number most people skip.
+      const breakevenWin = (1 / (1 + rr)) * 100;
+      const rrClass = rr >= 2 ? 'pos' : rr >= 1 ? '' : 'neg';
+
+      parts.push(`
+        <div class="calc-block">
+          <div class="calc-block-title">Risk / reward</div>
+          <div class="reaction-row"><span>Upside to $${fmt(U)}</span><span class="pos">+$${fmt(U - E)}/share (+${fmt(((U - E) / E) * 100)}%)</span></div>
+          <div class="reaction-row"><span>Downside to $${fmt(S)}</span><span class="neg">−$${fmt(E - S)}/share (−${fmt(((E - S) / E) * 100)}%)</span></div>
+          <div class="reaction-row"><span>Reward : risk</span><span class="${rrClass}"><strong>${fmt(rr)} : 1</strong></span></div>
+          <div class="reaction-row"><span>Win rate needed to break even</span><span>${fmt(breakevenWin)}%</span></div>
+          <div class="calc-note">
+            At ${fmt(rr)}:1, you'd need to be right more than <strong>${fmt(breakevenWin)}%</strong> of the
+            time for this setup to make money over many trades. A good ratio doesn't help if the
+            target is unrealistic — the ratio is only as honest as the two prices you picked.
+          </div>
+        </div>`);
+    }
+  }
+
+  // --- Outcome grid --------------------------------------------------------
+  if (validStop && R > 0) {
+    const shares = Math.max(1, Math.floor((B > 0 ? Math.min(R / (E - S), B / E) : R / (E - S))));
+    const lo = validUp ? S : E * 0.8;
+    const hi = validUp ? U : E * 1.2;
+    const points = [lo, lo + (E - lo) / 2, E, E + (hi - E) / 2, hi];
+
+    const rows = points
+      .map((p) => {
+        const pl = shares * (p - E);
+        const pct = ((p - E) / E) * 100;
+        return `<tr>
+          <td>$${fmt(p)}</td>
+          <td class="${pct >= 0 ? 'pos' : 'neg'}">${pct >= 0 ? '+' : ''}${fmt(pct)}%</td>
+          <td class="${pl >= 0 ? 'pos' : 'neg'}">${pl >= 0 ? '+' : '−'}$${fmt(Math.abs(pl))}</td>
+          <td>$${fmt(shares * p)}</td>
+        </tr>`;
+      })
+      .join('');
+
+    parts.push(`
+      <div class="calc-block">
+        <div class="calc-block-title">If the price ends up at… (${shares.toLocaleString()} shares)</div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Price</th><th>Move</th><th>P&amp;L</th><th>Position value</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+      </div>`);
+  }
+
+  parts.push(`<div class="reaction-disclaimer">
+    Arithmetic only. It sizes the position from the numbers you supply — it can't tell you
+    whether your target or stop are realistic, and that's the part that decides whether the
+    trade works. Stops can also be skipped through on gaps, so the "max loss" is not
+    guaranteed. Not financial advice.
+  </div>`);
+
+  pEls.result.innerHTML = parts.join('');
+}
+
+// ============================================================================
+// MOVERS SCANNER
+// ============================================================================
+
+let moversUniverse = 'top100';
+// After-hours by default — that's the session most worth scanning, since
+// earnings land there and the move is already visible before the next open.
+let moversSession = 'post';
+
+document.querySelectorAll('.universe-btn').forEach((b) => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.universe-btn').forEach((x) => x.classList.remove('active'));
+    b.classList.add('active');
+    moversUniverse = b.dataset.universe;
+  });
+});
+
+document.querySelectorAll('.msession-btn').forEach((b) => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.msession-btn').forEach((x) => x.classList.remove('active'));
+    b.classList.add('active');
+    moversSession = b.dataset.session;
+  });
+});
+
+document.getElementById('moversScan')?.addEventListener('click', scanMoversUI);
+
+const SESSION_TEXT = {
+  PRE: 'pre-market', PREPRE: 'pre-market',
+  POST: 'after-hours', POSTPOST: 'after-hours',
+  REGULAR: 'market open', CLOSED: 'market closed',
+};
+
+const SESSION_ASKED = {
+  post: 'after-hours', pre: 'pre-market', regular: 'regular session', auto: 'auto',
+};
+
+async function scanMoversUI() {
+  const btn = document.getElementById('moversScan');
+  const status = document.getElementById('moversStatus');
+  const up = document.getElementById('moversUp');
+  const down = document.getElementById('moversDown');
+  const minMove = document.getElementById('moversMinMove').value;
+
+  up.innerHTML = '';
+  down.innerHTML = '';
+  btn.disabled = true;
+  btn.textContent = 'Scanning…';
+  const count = moversUniverse === 'sp500' ? '~500' : '100';
+  status.className = 'status';
+  status.textContent = `Scanning ${count} tickers for ${SESSION_ASKED[moversSession]} moves… takes a few seconds (one request per ticker).`;
+
+  try {
+    const res = await fetch(
+      `/api/movers?universe=${encodeURIComponent(moversUniverse)}` +
+      `&session=${encodeURIComponent(moversSession)}` +
+      // limit=500 = the whole universe. "Show me everything moving" has to
+      // actually mean everything, not a quiet top-30.
+      `&minMove=${encodeURIComponent(minMove)}&limit=500`
+    );
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || 'Scan failed');
+
+    const live = SESSION_TEXT[d.marketState] || d.marketState || 'unknown';
+    document.getElementById('moversSession').textContent =
+      d.session === 'auto'
+        ? `auto → ${live}`
+        : `${SESSION_ASKED[d.session]} · market now: ${live}`;
+
+    // Three different "no results" causes, and they need different fixes:
+    // nothing moved (lower the threshold), no post-market print exists yet
+    // (wrong time of day), or the requests failed (rate limiting).
+    const thresh = d.minMove > 0 ? `moving ≥${d.minMove}%` : 'moving at all';
+    let msg = `${d.quoted} of ${d.scanned} quoted · ${d.moversFound} ${thresh} · ${(d.elapsedMs / 1000).toFixed(1)}s`;
+    if (d.flat) msg += ` · ${d.flat} flat`;
+    if (d.failed) msg += ` · ${d.failed} failed`;
+    if (d.staleCount) msg += ` · ${d.staleCount} from an earlier session`;
+    if (d.truncated) msg += ` · list capped at ${d.limit} per side`;
+
+    if (d.moversFound === 0) {
+      if (d.noFigure > d.scanned * 0.5 && d.session !== 'auto') {
+        msg += ` — ${d.noFigure} tickers have no ${SESSION_ASKED[d.session]} price yet` +
+               ` (market is currently ${live}). Try Auto, or scan again after the close.`;
+      } else if (d.minMove > 0) {
+        msg += ' — nothing moved that much. Set "Any move" to see everything.';
+      } else {
+        msg += ' — every quoted ticker printed flat.';
+      }
+    }
+    status.textContent = msg;
+    if (d.failed > d.scanned * 0.3) {
+      status.className = 'status warning';
+      status.textContent += ' ⚠ High failure rate — Yahoo may be rate-limiting.';
+    }
+
+    document.getElementById('moversUpHead').textContent =
+      `🟢 Up (${d.gainers.length})`;
+    document.getElementById('moversDownHead').textContent =
+      `🔴 Down (${d.losers.length})`;
+
+    up.innerHTML = d.gainers.length
+      ? d.gainers.map(moverRow).join('')
+      : '<span class="bz-note">Nothing up.</span>';
+    down.innerHTML = d.losers.length
+      ? d.losers.map(moverRow).join('')
+      : '<span class="bz-note">Nothing down.</span>';
+
+    // Clicking a mover pulls it into the Search view for a closer look.
+    document.querySelectorAll('.mover-item').forEach((el) => {
+      el.addEventListener('click', async () => {
+        await loadTicker(el.dataset.ticker, true);
+        switchToView('search');
+      });
+    });
+  } catch (err) {
+    status.className = 'status warning';
+    status.textContent = `⚠️ ${err.message}`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Scan now';
+  }
+}
+
+function moverRow(m) {
+  const cls = m.changePct >= 0 ? 'pos' : 'neg';
+  const sign = m.changePct >= 0 ? '+' : '';
+  // A stale flag matters: an after-hours print from last night is real data,
+  // but presenting it as "moving now" would be a lie by omission.
+  const stale = m.stale
+    ? `<span class="mover-stale" title="Last print was ${ageText(m.ageMins)} ago — earlier session, not live">⏱ ${ageText(m.ageMins)} old</span>`
+    : '';
+  return `
+    <div class="macro-item mover-item${m.stale ? ' is-stale' : ''}" data-ticker="${escapeHtml(m.ticker)}" title="Click to open in Search">
+      <span class="mover-tick">${escapeHtml(m.ticker)}</span>
+      <span class="mover-chg ${cls}">${sign}${fmt(m.changePct)}%</span>
+      <span class="mover-name">${escapeHtml(m.name)}${stale}</span>
+      <span class="macro-date">$${fmt(m.price)}<span class="mover-sess">${escapeHtml(m.session)}</span></span>
+    </div>`;
+}
+
+function ageText(mins) {
+  if (typeof mins !== 'number') return '';
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
 
 // ============================================================================
 // Startup

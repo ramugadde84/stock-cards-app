@@ -16,19 +16,28 @@
  *   open http://localhost:3000
  */
 
+// Load .env before anything reads process.env. Keeps API keys out of the
+// command line entirely — no more re-typing them, and no trailing-space
+// surprises from Windows CMD's `set VAR=value && ...`.
+require('dotenv').config();
+
 const express = require('express');
 const path = require('path');
 const { getEarningsForDate } = require('./earnings');
-const { getCoupons } = require('./coupons');
+const { getCoupons, isConfigured: isCouponLookupConfigured } = require('./coupons');
 const {
   getTickerReport,
   getBullsBearsOnly,
   getEarningsThisMonthOnly,
   getEarningsCalendarOnly,
+  getTickerNews,
+  getOptionsActivity,
+  debugRaw,
 } = require('./benzinga');
 const { analyzeEarnings, isConfigured: aiConfigured } = require('./ai');
 const { httpFetch } = require('./httpClient');
 const { getMacroCalendar } = require('./macro');
+const { scanMovers } = require('./movers');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -374,6 +383,88 @@ async function priceEarningsEntries(entries) {
   return out;
 }
 
+
+// ============================================================================
+// GET /api/debug/benzinga?path=...&<params> — raw response inspector
+// ============================================================================
+// Shows exactly what Benzinga returns, so an empty result can be diagnosed
+// as "not licensed" vs "parsed the wrong key". The token is taken from the
+// environment and redacted in the output, so nothing sensitive is exposed.
+app.get('/api/debug/benzinga', async (req, res) => {
+  const { path: bzPath, ...raw } = req.query;
+
+  // Express parses `parameters[tickers]=X` into { parameters: { tickers: X } }.
+  // Benzinga wants the literal bracket form, so flatten it back — otherwise
+  // the param serialises as "[object Object]" and is silently ignored.
+  const params = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      for (const [sub, subVal] of Object.entries(v)) params[`${k}[${sub}]`] = String(subVal);
+    } else {
+      params[k] = String(v);
+    }
+  }
+  if (!bzPath || !String(bzPath).startsWith('/api/')) {
+    return res.status(400).json({
+      error: 'Provide ?path=/api/v2.1/calendar/earnings (plus any query params).',
+      examples: [
+        '/api/debug/benzinga?path=/api/v2.1/calendar/earnings&parameters[tickers]=SMCI',
+        '/api/debug/benzinga?path=/api/v1/bulls_bears_say&symbols=SMCI',
+      ],
+    });
+  }
+  try {
+    res.json(await debugRaw(String(bzPath), params));
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+
+
+// ============================================================================
+// GET /api/options/:ticker — top call & put trades by premium
+// ============================================================================
+// NOTE: US equity options trade 09:30-16:00 ET only — there is no extended-
+// hours options session. Outside those hours this returns the most recent
+// session's flow, and the response says so explicitly.
+app.get('/api/options/:ticker', async (req, res) => {
+  const rawTicker = String(req.params.ticker || '').trim().toUpperCase();
+  if (!isValidTickerFormat(rawTicker)) {
+    return res.status(400).json({ error: 'Please enter a valid ticker symbol.' });
+  }
+  try {
+    res.json(await getOptionsActivity(rawTicker, {
+      limit: req.query.limit,
+      lookbackDays: req.query.days,
+    }));
+  } catch (err) {
+    console.error(`Options lookup failed for ${rawTicker}:`, err);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// GET /api/news/:ticker — Benzinga wire news for one ticker
+// ============================================================================
+// The wire is where Benzinga's speed advantage actually lives — stories land
+// here the moment they cross, ahead of aggregators.
+app.get('/api/news/:ticker', async (req, res) => {
+  const rawTicker = String(req.params.ticker || '').trim().toUpperCase();
+  if (!isValidTickerFormat(rawTicker)) {
+    return res.status(400).json({ error: 'Please enter a valid ticker symbol.' });
+  }
+  try {
+    res.json(await getTickerNews(rawTicker, {
+      limit: req.query.limit,
+      channels: req.query.channels,
+    }));
+  } catch (err) {
+    console.error(`News lookup failed for ${rawTicker}:`, err);
+    res.status(502).json({ error: err.message });
+  }
+});
+
 // ============================================================================
 // GET /api/bulls-bears/:ticker — just the bull & bear cases (card button)
 // ============================================================================
@@ -422,6 +513,36 @@ app.get('/api/earnings-calendar', async (req, res) => {
   }
 });
 
+
+
+// ============================================================================
+// GET /api/movers?universe=top100|sp500&minMove=1&session=post — movers scanner
+// ============================================================================
+// Returns only tickers moving more than `minMove` percent in the requested
+// session. `session=auto` follows whatever Yahoo says is live; `session=post`
+// pins it to after-hours regardless of the clock, which is the common case —
+// you want last night's earnings reaction even when it's 9am.
+app.get('/api/movers', async (req, res) => {
+  const universe = String(req.query.universe || 'top100');
+  if (!['top100', 'sp500'].includes(universe)) {
+    return res.status(400).json({ error: '"universe" must be top100 or sp500.' });
+  }
+  const session = String(req.query.session || 'auto');
+  if (!['auto', 'post', 'pre', 'regular'].includes(session)) {
+    return res.status(400).json({ error: '"session" must be auto, post, pre or regular.' });
+  }
+  try {
+    res.json(await scanMovers({
+      universe,
+      session,
+      minMove: req.query.minMove,
+      limit: req.query.limit,
+    }));
+  } catch (err) {
+    console.error('Movers scan failed:', err);
+    res.status(502).json({ error: err.message });
+  }
+});
 
 // ============================================================================
 // GET /api/macro-calendar — CPI / jobs / FOMC dates, auto-rolling
@@ -472,12 +593,19 @@ app.get('/api/ai-analysis/:ticker', async (req, res) => {
     const bullsBears =
       bbResult.status === 'fulfilled' && bbResult.value.found ? bbResult.value : null;
 
+    const earningsValue =
+      earningsResult.status === 'fulfilled' ? earningsResult.value : null;
+
     const earningsData =
-      earningsResult.status === 'fulfilled' && earningsResult.value.found
-        ? earningsResult.value.entries.find((e) => e.reported) || earningsResult.value.entries[0]
+      earningsValue?.found && earningsValue.entries?.length
+        ? earningsValue.entries.find((e) => e.reported) || earningsValue.entries[0]
         : null;
 
-    if (!bullsBears && !earningsData) {
+    // The wire release is the richest input — it carries guidance language
+    // and margin commentary that structured EPS fields never include.
+    const newsReleases = earningsValue?.newsReleases || [];
+
+    if (!bullsBears && !earningsData && !newsReleases.length) {
       return res.json({
         configured: true,
         ticker: rawTicker,
@@ -489,6 +617,7 @@ app.get('/api/ai-analysis/:ticker', async (req, res) => {
     const analysis = await analyzeEarnings(rawTicker, {
       earnings: earningsData,
       bullsBears,
+      newsReleases,
     });
 
     res.json({
@@ -498,6 +627,7 @@ app.get('/api/ai-analysis/:ticker', async (req, res) => {
       sourcesUsed: {
         earnings: Boolean(earningsData),
         bullBearCases: Boolean(bullsBears),
+        pressRelease: newsReleases.length > 0,
       },
       analysis,
     });
@@ -556,6 +686,12 @@ app.get('/api/benzinga/:ticker', async (req, res) => {
 // See coupons.js for why this pulls from affiliate networks rather than
 // trying to "verify" codes by driving retailer checkouts (short version:
 // there's no legitimate general way to do the latter).
+// Lets the UI know up front whether live lookup is possible, so it can hide
+// the search box instead of offering a button that can only ever fail.
+app.get('/api/coupons/status', (req, res) => {
+  res.json({ configured: isCouponLookupConfigured(), provider: process.env.COUPON_PROVIDER || 'rakuten' });
+});
+
 app.get('/api/coupons', async (req, res) => {
   const store = String(req.query.store || '').trim();
 
@@ -639,5 +775,31 @@ function todayYMD() {
 }
 
 app.listen(PORT, () => {
-  console.log(`Stock Watch running at http://localhost:${PORT}`);
+  console.log(`\nStock Watch running at http://localhost:${PORT}\n`);
+
+  // Report which keys were actually picked up. A key that silently failed to
+  // load looks identical to a licensing problem from the UI, and that has
+  // cost real debugging time — so say it plainly at startup.
+  const mask = (v) => (v ? `${v.slice(0, 6)}…${v.slice(-4)} (len ${v.length})` : null);
+  const checks = [
+    ['BENZINGA_API_KEY', process.env.BENZINGA_API_KEY, 'bull/bear, earnings, news, options'],
+    ['ANTHROPIC_API_KEY', process.env.ANTHROPIC_API_KEY, 'AI analysis'],
+  ];
+
+  console.log('Configuration:');
+  for (const [name, val, purpose] of checks) {
+    if (!val) {
+      console.log(`  ✗ ${name.padEnd(18)} not set  -> ${purpose} disabled`);
+    } else if (/["'\s]/.test(val)) {
+      // The classic Windows `set VAR=x && npm start` trailing-space bug.
+      console.log(`  ⚠ ${name.padEnd(18)} ${mask(val)}  -> HAS QUOTES OR WHITESPACE, will be rejected`);
+    } else {
+      console.log(`  ✓ ${name.padEnd(18)} ${mask(val)}  -> ${purpose}`);
+    }
+  }
+  console.log(`  · APP_TIMEZONE       ${process.env.APP_TIMEZONE || 'America/Chicago (default)'}`);
+  if (!process.env.BENZINGA_API_KEY && !process.env.ANTHROPIC_API_KEY) {
+    console.log('\n  Tip: copy .env.example to .env and put your keys there — then just `npm start`.');
+  }
+  console.log('');
 });

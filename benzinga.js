@@ -84,6 +84,29 @@ async function bzGet(path, params) {
   }
 }
 
+/**
+ * Pulls the row array out of a Benzinga response.
+ *
+ * Their endpoints are NOT consistent about shape:
+ *   - /api/v1/bulls_bears_say  -> { "bulls_say_bears_say": [ ... ] }
+ *   - /api/v2.1/calendar/earnings -> a BARE ARRAY: [ ... ]
+ *
+ * Assuming the object form made the earnings lookup silently return nothing
+ * (`json?.earnings` is undefined on an array), which looked identical to
+ * "no data" and sent us hunting a licence problem that didn't exist.
+ * Accept every shape rather than trusting any single one.
+ */
+function extractRows(json, ...keys) {
+  if (Array.isArray(json)) return json;              // bare array
+  if (!json || typeof json !== 'object') return [];
+  for (const k of keys) {
+    if (Array.isArray(json[k])) return json[k];      // named key
+  }
+  // Last resort: a single array-valued property under any name.
+  const arrays = Object.values(json).filter(Array.isArray);
+  return arrays.length === 1 ? arrays[0] : [];
+}
+
 // ---------------------------------------------------------------------------
 // Individual datasets
 // ---------------------------------------------------------------------------
@@ -96,7 +119,7 @@ async function bzGet(path, params) {
  */
 async function getBullsBears(ticker) {
   const json = await bzGet('/api/v1/bulls_bears_say', { symbols: ticker, pagesize: '1' });
-  const list = json['bulls_say_bears_say'] || json['bulls-say-bears-say'] || [];
+  const list = extractRows(json, 'bulls_say_bears_say', 'bulls-say-bears-say');
   const latest = Array.isArray(list) ? list[0] : null;
   if (!latest) return null;
 
@@ -150,29 +173,120 @@ async function getBullsBearsOnly(ticker) {
  * not an error and the UI treats it as "nothing to show".
  */
 async function getEarningsThisMonth(ticker) {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = now.getMonth();
+  // "Today" in the display timezone, not UTC — otherwise late evening in the
+  // US rolls the month over early. Same bug that made the Key Dates tab show
+  // tomorrow's CPI as "TODAY".
+  const tz = process.env.APP_TIMEZONE || 'America/Chicago';
+  const todayLocal = new Intl.DateTimeFormat('en-CA', {
+    timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(new Date());
 
+  const [y, m] = todayLocal.split('-').map(Number);
   const pad = (n) => String(n).padStart(2, '0');
-  const firstDay = `${y}-${pad(m + 1)}-01`;
-  // Day 0 of the next month is the last day of this one (handles 28/29/30/31).
-  const lastDay = `${y}-${pad(m + 1)}-${pad(new Date(y, m + 1, 0).getDate())}`;
-  const monthLabel = now.toLocaleString('en-US', { month: 'long', year: 'numeric' });
-
-  const json = await bzGet('/api/v2.1/calendar/earnings', {
-    'parameters[tickers]': ticker,
-    'parameters[date_from]': firstDay,
-    'parameters[date_to]': lastDay,
-    pagesize: '10',
+  const monthPrefix = `${y}-${pad(m)}`;
+  const firstDay = `${monthPrefix}-01`;
+  const lastDay = `${monthPrefix}-${pad(new Date(Date.UTC(y, m, 0)).getUTCDate())}`;
+  const monthLabel = new Date(Date.UTC(y, m - 1, 1)).toLocaleString('en-US', {
+    month: 'long', year: 'numeric', timeZone: 'UTC',
   });
 
-  const rows = json?.earnings || [];
-  if (!rows.length) {
-    return { found: false, monthLabel, range: { from: firstDay, to: lastDay } };
+  // WHY THIS TRIES SEVERAL QUERIES INSTEAD OF ONE
+  //
+  // Observed behaviour of /api/v2.1/calendar/earnings on a live key:
+  //   - No params            -> {"earnings":[...]} with data, BUT the default
+  //                             window is roughly a YEAR AHEAD (2027 dates).
+  //   - parameters[tickers]  -> a bare "[]" — empty. Either the param form is
+  //                             wrong, or it filters within that future window
+  //                             where the ticker has no row.
+  //
+  // So: try the documented form, then an unwrapped variant, then fall back to
+  // an explicit date window (which forces it off the future default) and
+  // filter by ticker locally. First strategy that yields rows wins.
+  // NOTE: pagesize caps at 100 — asking for 1000 still returns 100.
+  const attempts = [
+    { label: 'parameters[tickers]', params: { 'parameters[tickers]': ticker, pagesize: '100' } },
+    { label: 'tickers (unwrapped)', params: { tickers: ticker, pagesize: '100' } },
+    {
+      label: 'unwrapped date range + ticker',
+      params: { tickers: ticker, date_from: firstDay, date_to: lastDay, pagesize: '100' },
+    },
+    {
+      label: 'parameters[date] single day + ticker',
+      params: { 'parameters[tickers]': ticker, 'parameters[date]': lastDay, pagesize: '100' },
+    },
+    {
+      // Sort ascending from the start of the month — the default ordering
+      // appears to begin months in the future, which is why an August query
+      // came back full of October-to-July dates.
+      label: 'date window sorted asc + local filter',
+      params: {
+        'parameters[date_from]': firstDay,
+        'parameters[date_to]': lastDay,
+        parameters_date_sort: 'date',
+        sort: 'date:asc',
+        pagesize: '100',
+      },
+      filterByTicker: true,
+      filterByMonth: true,
+    },
+  ];
+
+  let rows = [];
+  let strategyUsed = 'none';
+  const attemptLog = [];
+
+  for (const attempt of attempts) {
+    let candidate = [];
+    try {
+      const json = await bzGet('/api/v2.1/calendar/earnings', attempt.params);
+      candidate = extractRows(json, 'earnings');
+      if (attempt.filterByTicker) {
+        candidate = candidate.filter(
+          (r) => String(r.ticker || '').toUpperCase() === ticker.toUpperCase()
+        );
+      }
+      // Only accept rows actually inside the target month. Without this a
+      // strategy "succeeds" with far-future rows the API returned despite
+      // the date filter, which is worse than returning nothing.
+      candidate = candidate.filter((r) => String(r.date || '').startsWith(monthPrefix));
+    } catch (e) {
+      attemptLog.push(`${attempt.label}: error ${e.message}`);
+      continue;
+    }
+    attemptLog.push(`${attempt.label}: ${candidate.length} in-month row(s)`);
+    if (candidate.length) {
+      rows = candidate;
+      strategyUsed = attempt.label;
+      break;
+    }
   }
 
-  const entries = rows.map((r) => ({
+  // Diagnostics: distinguishes "API returned nothing at all" from "API
+  // returned rows, but none in this month" — very different problems.
+  const diagnostics = {
+    rowsReturned: rows.length,
+    datesReturned: rows.map((r) => r.date).filter(Boolean).sort(),
+    monthFilter: `${firstDay} .. ${lastDay}`,
+    strategyUsed,
+    attempts: attemptLog,
+  };
+  console.log(
+    `[benzinga] ${ticker}: ${rows.length} row(s) via "${strategyUsed}" ` +
+    `[${attemptLog.join(' | ')}]; dates=[${diagnostics.datesReturned.join(', ')}]`
+  );
+
+  const inMonth = rows.filter((r) => String(r.date || '').startsWith(monthPrefix));
+
+  if (!inMonth.length) {
+    return {
+      found: false,
+      monthLabel,
+      range: { from: firstDay, to: lastDay },
+      diagnostics,
+    };
+  }
+
+  const entries = inMonth.map((r) => ({
     date: r.date || null,
     time: r.time || null,
     period: [r.period, r.period_year].filter(Boolean).join(' ') || null,
@@ -194,6 +308,7 @@ async function getEarningsThisMonth(ticker) {
     found: true,
     monthLabel,
     range: { from: firstDay, to: lastDay },
+    diagnostics,
     entries,
   };
 }
@@ -226,7 +341,7 @@ async function getEarningsCalendar(dateStr, session = 'all') {
     pagesize: '1000', // Benzinga's per-page maximum
   });
 
-  const rows = json?.earnings || [];
+  const rows = extractRows(json, 'earnings');
 
   const entries = rows.map((r) => {
     const revenueActual = numOrNull(r.revenue);
@@ -283,6 +398,50 @@ function classifySession(time) {
   return 'during';
 }
 
+/**
+ * DEBUG: returns the untouched response for a Benzinga path, so we can see
+ * what the API actually sends rather than inferring it from an empty result.
+ *
+ * Deliberately returns the raw body and the top-level keys — an empty
+ * `earnings` array and a payload nested under a DIFFERENT key look identical
+ * from the outside, but one is a licence problem and the other is a parser
+ * bug. This tells them apart. Uses the server-side key, so nothing sensitive
+ * goes in the URL.
+ */
+async function debugRaw(pathName, params) {
+  const token = getApiKey();
+  if (!token) throw new Error('BENZINGA_API_KEY is not set.');
+
+  const qs = new URLSearchParams({ token, ...params });
+  const url = `${BASE}${pathName}?${qs.toString()}`;
+
+  const response = await httpFetch(url, { headers: { accept: 'application/json' } });
+  const text = await response.text();
+
+  let parsed = null;
+  let topLevelKeys = null;
+  try {
+    parsed = JSON.parse(text);
+    topLevelKeys = parsed && typeof parsed === 'object' ? Object.keys(parsed) : null;
+  } catch (e) {
+    /* leave as raw text */
+  }
+
+  return {
+    requestUrl: url.replace(/token=[^&]+/, 'token=***REDACTED***'),
+    httpStatus: response.status,
+    contentType: response.headers.get('content-type'),
+    topLevelKeys,
+    // The shape question: which key holds the array, and how many entries?
+    arrayCounts: parsed && typeof parsed === 'object'
+      ? Object.fromEntries(
+          Object.entries(parsed).map(([k, v]) => [k, Array.isArray(v) ? v.length : typeof v])
+        )
+      : null,
+    rawBody: text.slice(0, 4000),
+  };
+}
+
 /** Wrapper mirroring the other *Only helpers. */
 async function getEarningsCalendarOnly(dateStr, session) {
   if (!isConfigured()) {
@@ -313,7 +472,381 @@ async function getEarningsThisMonthOnly(ticker) {
     };
   }
   const data = await getEarningsThisMonth(ticker);
-  return { configured: true, ticker, ...data };
+  if (data.found) return { configured: true, ticker, source: 'benzinga-calendar', ...data };
+
+  // FAST PATH: Benzinga's news wire carries the results release minutes
+  // after it crosses — well before the calendar endpoint is backfilled, and
+  // typically ahead of Yahoo. Try it before falling back.
+  const monthPrefix = data.range?.from?.slice(0, 7);
+  try {
+    const news = await getEarningsNews(ticker, { full: true, limit: 15 });
+    const inMonth = news.filter((n) => {
+      const d = n.created ? new Date(n.created).toISOString().slice(0, 10) : null;
+      return d && (!monthPrefix || d.startsWith(monthPrefix));
+    });
+
+    if (inMonth.length) {
+      console.log(`[benzinga] ${ticker}: ${inMonth.length} earnings release(s) from the news wire.`);
+      return {
+        configured: true,
+        ticker,
+        source: 'benzinga-news',
+        found: true,
+        monthLabel: data.monthLabel,
+        range: data.range,
+        diagnostics: {
+          ...data.diagnostics,
+          fallback: 'Benzinga news wire (calendar endpoint is forward-looking only)',
+        },
+        // Rendered as release headlines rather than a numbers table — the
+        // wire gives the story and timestamp; parsing EPS out of free-form
+        // prose reliably isn't something to fake here. The AI analysis
+        // button can read the body if you want the figures extracted.
+        newsReleases: inMonth.map((n) => ({
+          title: n.title,
+          created: n.created,
+          url: n.url,
+          teaser: n.teaser,
+        })),
+        entries: [],
+      };
+    }
+  } catch (e) {
+    console.error(`[benzinga] news-wire lookup failed for ${ticker}:`, e.message);
+    data.diagnostics = { ...data.diagnostics, newsWire: `failed: ${e.message}` };
+  }
+
+  // Benzinga's calendar is forward-looking (all observed rows had an empty
+  // `eps` actual), so a company that has just REPORTED won't be in it. Fall
+  // back to Yahoo, which does carry actual reported EPS — the same source
+  // the working "Check Result" button already uses.
+  try {
+    const monthPrefix = data.range?.from?.slice(0, 7);
+    const yahooEntries = await getReportedEarningsFromYahoo(ticker, monthPrefix);
+    if (yahooEntries.length) {
+      console.log(`[benzinga] ${ticker}: falling back to Yahoo — ${yahooEntries.length} reported row(s).`);
+      return {
+        configured: true,
+        ticker,
+        source: 'yahoo-fallback',
+        found: true,
+        monthLabel: data.monthLabel,
+        range: data.range,
+        diagnostics: { ...data.diagnostics, fallback: 'Yahoo earningsHistory (Benzinga had no in-month rows)' },
+        entries: yahooEntries,
+      };
+    }
+    data.diagnostics = { ...data.diagnostics, fallback: 'Yahoo also had no rows for this month' };
+  } catch (e) {
+    console.error(`[benzinga] Yahoo fallback failed for ${ticker}:`, e.message);
+    data.diagnostics = { ...data.diagnostics, fallback: `Yahoo fallback failed: ${e.message}` };
+  }
+
+  return { configured: true, ticker, source: 'benzinga', ...data };
+}
+
+/**
+ * Earnings results from Benzinga's NEWS WIRE — the fast path.
+ *
+ * WHY THIS AND NOT THE CALENDAR ENDPOINT:
+ * /calendar/earnings is a scheduling dataset. Every row observed had an
+ * empty `eps` actual with only `eps_est`, and its dates ran months ahead —
+ * it gets backfilled with actuals well after the fact.
+ *
+ * The speed advantage Benzinga actually sells lives in the newsfeed: the
+ * earnings press release hits the wire the instant the company publishes,
+ * typically minutes ahead of aggregators like Yahoo. That's the same feed
+ * that carried "RADNET REPORTS SECOND QUARTER FINANCIAL RESULTS..." at
+ * 4:00 PM tagged BZ Wire.
+ *
+ * So for "did they just report, and what were the numbers", the newsfeed is
+ * both faster AND the only Benzinga source that has the actuals early.
+ */
+async function getEarningsNews(ticker, opts = {}) {
+  const json = await bzGet('/api/v2/news', {
+    tickers: ticker,
+    // Body text is needed to pull EPS/revenue out of the release.
+    displayOutput: opts.full ? 'full' : 'abstract',
+    pageSize: String(opts.limit || 15),
+  });
+
+  const items = extractRows(json, 'news');
+
+  // Keep only genuine earnings-results stories. Previews ("what to expect
+  // ahead of earnings") and analyst notes are excluded — they're about an
+  // upcoming report, not a released one.
+  const RESULTS = /reports?\s+(first|second|third|fourth|q[1-4]|fy)|financial results|earnings results|\bQ[1-4]\b.*(results|earnings)|posts?\s+Q[1-4]|announces?.*(results|earnings)/i;
+  const PREVIEW = /ahead of earnings|what to expect|preview|expectations|analysts? expect|options market|to report|will report|announces date/i;
+
+  return items
+    .map((n) => ({
+      id: n.id ?? null,
+      title: n.title || '',
+      created: n.created || null,
+      updated: n.updated || null,
+      url: n.url || null,
+      teaser: n.teaser || null,
+      body: n.body || null,
+      channels: Array.isArray(n.channels) ? n.channels.map((c) => c.name || c) : [],
+    }))
+    .filter((n) => RESULTS.test(n.title) && !PREVIEW.test(n.title));
+}
+
+/**
+ * Largest options trades for a ticker — top calls and top puts.
+ *
+ * IMPORTANT REALITY CHECK ON "LIVE ANY TIME":
+ * US equity options trade 09:30-16:00 ET only. Unlike stocks, there is no
+ * pre-market or after-hours options session for retail. So outside those
+ * hours this necessarily returns the MOST RECENT SESSION's activity, not
+ * live quotes — the data simply doesn't exist while the market is shut.
+ * Every response is stamped with its trade date/time so the age is obvious
+ * rather than implied to be current.
+ *
+ * "Highest" is ranked by PREMIUM (cost basis = total dollars spent), which
+ * is the meaningful measure of conviction — 10,000 contracts of a cheap
+ * far-dated option is a smaller bet than 100 contracts of a costly one.
+ * Volume and open interest are shown too so you can judge for yourself.
+ */
+async function getOptionsActivity(ticker, opts = {}) {
+  if (!isConfigured()) {
+    return {
+      configured: false,
+      ticker,
+      note:
+        'BENZINGA_API_KEY is not set on the server. Set it on its own line:\n' +
+        '    set BENZINGA_API_KEY=bz.xxxx\n' +
+        '    npm start',
+    };
+  }
+
+  const limit = Math.min(Number(opts.limit) || 10, 50);
+
+  // Look back far enough to always catch the last trading session, including
+  // over a weekend or holiday break.
+  const lookbackDays = Number(opts.lookbackDays) || 7;
+  const today = new Date();
+  const from = new Date(today.getTime() - lookbackDays * 86400000)
+    .toISOString().slice(0, 10);
+  const to = today.toISOString().slice(0, 10);
+
+  // Same defensive pattern as earnings: Benzinga's date/ticker params have
+  // proven unreliable across endpoints, so try several and filter locally.
+  const attempts = [
+    { label: 'tickers + date range', params: {
+      'parameters[tickers]': ticker, 'parameters[date_from]': from,
+      'parameters[date_to]': to, pagesize: '100' } },
+    { label: 'tickers only', params: { 'parameters[tickers]': ticker, pagesize: '100' } },
+    { label: 'unwrapped tickers', params: { tickers: ticker, pagesize: '100' } },
+  ];
+
+  let rows = [];
+  let strategyUsed = 'none';
+  const attemptLog = [];
+
+  for (const a of attempts) {
+    try {
+      const json = await bzGet('/api/v1/signal/option_activity', a.params);
+      let candidate = extractRows(json, 'option_activity', 'signals', 'data');
+      // Always confirm the ticker locally — a filter that silently doesn't
+      // apply would otherwise show another company's flow.
+      candidate = candidate.filter(
+        (r) => String(r.ticker || r.symbol || '').toUpperCase() === ticker.toUpperCase()
+      );
+      attemptLog.push(`${a.label}: ${candidate.length} row(s)`);
+      if (candidate.length) { rows = candidate; strategyUsed = a.label; break; }
+    } catch (e) {
+      attemptLog.push(`${a.label}: error ${e.message}`);
+    }
+  }
+
+  const num = (v) => {
+    if (v === null || v === undefined || v === '') return null;
+    const n = typeof v === 'number' ? v : Number(String(v).replace(/[$,%\s]/g, ''));
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const trades = rows.map((r) => ({
+    ticker: r.ticker || r.symbol || ticker,
+    type: String(r.put_call || r.putCall || '').toUpperCase(),   // CALL | PUT
+    strike: num(r.strike_price ?? r.strike),
+    expiry: r.date_expiration || r.expiration || null,
+    // Total dollars in the trade — the conviction measure.
+    premium: num(r.cost_basis ?? r.premium ?? r.total_value),
+    volume: num(r.volume),
+    openInterest: num(r.open_interest ?? r.openInterest),
+    price: num(r.price ?? r.midpoint),
+    underlyingPrice: num(r.underlying_price ?? r.underlyingPrice),
+    // SWEEP = urgency (filled across multiple exchanges), TRADE = block.
+    activityType: r.option_activity_type || r.type || null,
+    sentiment: r.sentiment || null,
+    date: r.date || null,
+    time: r.time || null,
+    description: r.description || r.description_extended || null,
+  }));
+
+  const byPremium = (a, b) => (b.premium ?? 0) - (a.premium ?? 0);
+  const calls = trades.filter((t) => t.type === 'CALL').sort(byPremium).slice(0, limit);
+  const puts = trades.filter((t) => t.type === 'PUT').sort(byPremium).slice(0, limit);
+
+  // Most recent timestamp present — makes staleness explicit.
+  const stamps = trades.map((t) => `${t.date || ''} ${t.time || ''}`.trim()).filter(Boolean).sort();
+  const latest = stamps.length ? stamps[stamps.length - 1] : null;
+
+  const callPremium = calls.reduce((s, t) => s + (t.premium || 0), 0);
+  const putPremium = puts.reduce((s, t) => s + (t.premium || 0), 0);
+
+  return {
+    configured: true,
+    ticker,
+    marketOpen: isOptionsMarketOpen(),
+    latestTradeStamp: latest,
+    totalTrades: trades.length,
+    calls,
+    puts,
+    // A rough skew read — more call premium than put premium, or vice versa.
+    // Deliberately descriptive, not predictive.
+    premiumSkew: {
+      callPremium,
+      putPremium,
+      leaning: callPremium > putPremium * 1.2 ? 'calls'
+             : putPremium > callPremium * 1.2 ? 'puts' : 'balanced',
+    },
+    diagnostics: { strategyUsed, attempts: attemptLog, window: `${from} .. ${to}` },
+  };
+}
+
+/** True during US equity options hours (09:30-16:00 ET, weekdays). */
+function isOptionsMarketOpen() {
+  const now = new Date();
+  const et = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', weekday: 'short',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(now);
+  const get = (t) => et.find((p) => p.type === t)?.value;
+  const day = get('weekday');
+  if (['Sat', 'Sun'].includes(day)) return false;
+  const mins = Number(get('hour')) * 60 + Number(get('minute'));
+  return mins >= 570 && mins < 960; // 09:30 .. 16:00
+}
+
+/**
+ * All recent wire news for one ticker — not just earnings.
+ *
+ * This is the endpoint that carries Benzinga's actual speed advantage: the
+ * release hits here the moment it crosses the wire. Useful for anything
+ * market-moving (M&A, guidance updates, FDA, downgrades), not only earnings.
+ */
+async function getTickerNews(ticker, opts = {}) {
+  if (!isConfigured()) {
+    return {
+      configured: false,
+      ticker,
+      note:
+        'BENZINGA_API_KEY is not set on the server. Set it on its own line:\n' +
+        '    set BENZINGA_API_KEY=bz.xxxx\n' +
+        '    npm start',
+    };
+  }
+
+  const params = {
+    tickers: ticker,
+    displayOutput: 'abstract',
+    pageSize: String(Math.min(Number(opts.limit) || 20, 100)),
+  };
+  if (opts.channels) params.channels = opts.channels;
+
+  const json = await bzGet('/api/v2/news', params);
+  const items = extractRows(json, 'news');
+
+  const stories = items.map((n) => ({
+    id: n.id ?? null,
+    title: n.title || '',
+    teaser: stripTags(n.teaser),
+    created: n.created || null,
+    updated: n.updated || null,
+    url: n.url || null,
+    author: n.author || null,
+    channels: Array.isArray(n.channels) ? n.channels.map((c) => c.name || c).filter(Boolean) : [],
+    // Wire stories are the fast ones — surfaced so the UI can badge them.
+    isWire: /wire|press release|globe ?newswire|business ?wire|pr ?newswire/i.test(
+      [n.author, ...(Array.isArray(n.channels) ? n.channels.map((c) => c.name || c) : [])].join(' ')
+    ),
+  }));
+
+  // Newest first — the API's default ordering isn't guaranteed.
+  stories.sort((a, b) => new Date(b.created || 0) - new Date(a.created || 0));
+
+  return { configured: true, ticker, count: stories.length, stories };
+}
+
+/** Removes HTML tags from teaser copy. */
+function stripTags(html) {
+  if (!html) return null;
+  const text = String(html)
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text || null;
+}
+
+/**
+ * Reported earnings from Yahoo, used when Benzinga has nothing.
+ *
+ * WHY THIS EXISTS: Benzinga's /calendar/earnings appears to be a FORWARD
+ * calendar — every row observed had an empty `eps` (actual) with only
+ * `eps_est` populated, and dates ran months into the future regardless of
+ * the date filters. So a company that reported yesterday isn't in it.
+ *
+ * Yahoo's quoteSummary earningsHistory does carry actual reported EPS, and
+ * the app already uses it successfully for the "Check Result" button.
+ */
+async function getReportedEarningsFromYahoo(ticker, monthPrefix) {
+  const url =
+    'https://query1.finance.yahoo.com/v10/finance/quoteSummary/' +
+    encodeURIComponent(ticker) + '?modules=earningsHistory';
+
+  const res = await httpFetch(url, {
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+        '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      Accept: 'application/json',
+    },
+  });
+  if (!res.ok) throw new Error(`Yahoo returned HTTP ${res.status}`);
+
+  const json = await res.json();
+  const history = json?.quoteSummary?.result?.[0]?.earningsHistory?.history || [];
+
+  const num = (v) => {
+    const n = v && typeof v === 'object' ? v.raw : v;
+    return typeof n === 'number' && isFinite(n) ? n : null;
+  };
+
+  return history
+    .map((h) => {
+      const epoch = h?.quarter && typeof h.quarter === 'object' ? h.quarter.raw : h?.quarter;
+      const date = epoch ? new Date(epoch * 1000).toISOString().slice(0, 10) : null;
+      const surprise = num(h?.surprisePercent);
+      return {
+        date,
+        time: null,
+        period: h?.period || null,
+        epsActual: num(h?.epsActual),
+        epsEstimate: num(h?.epsEstimate),
+        // Yahoo gives this as a fraction (0.0549), not a percentage.
+        epsSurprisePercent: surprise !== null ? Math.round(surprise * 10000) / 100 : null,
+        revenueActual: null, // not provided by this Yahoo module
+        revenueEstimate: null,
+        revenueSurprisePercent: null,
+        currency: null,
+        reported: num(h?.epsActual) !== null,
+      };
+    })
+    .filter((e) => e.date && (!monthPrefix || e.date.startsWith(monthPrefix)));
 }
 
 /**
@@ -325,7 +858,7 @@ async function getEarnings(ticker) {
     'parameters[tickers]': ticker,
     pagesize: '4',
   });
-  const rows = json?.earnings || [];
+  const rows = extractRows(json, 'earnings');
   if (!rows.length) return null;
 
   // Newest first — the API sorts ascending by date in some responses.
@@ -357,7 +890,7 @@ async function getWiims(ticker) {
     pageSize: '3',
     displayOutput: 'abstract',
   });
-  const items = Array.isArray(json) ? json : json?.news || [];
+  const items = extractRows(json, 'news');
   return items.slice(0, 3).map((n) => ({
     title: n.title || null,
     created: n.created || null,
@@ -371,7 +904,7 @@ async function getRatings(ticker) {
     'parameters[tickers]': ticker,
     pagesize: '5',
   });
-  const rows = json?.ratings || [];
+  const rows = extractRows(json, 'ratings');
   return rows.slice(0, 5).map((r) => ({
     date: r.date || null,
     firm: r.analyst || r.analyst_name || null,
@@ -390,7 +923,7 @@ async function getNews(ticker) {
     pageSize: '5',
     displayOutput: 'abstract',
   });
-  const items = Array.isArray(json) ? json : json?.news || [];
+  const items = extractRows(json, 'news');
   return items.slice(0, 5).map((n) => ({
     title: n.title || null,
     created: n.created || null,
@@ -501,5 +1034,8 @@ module.exports = {
   getBullsBearsOnly,
   getEarningsThisMonthOnly,
   getEarningsCalendarOnly,
+  getTickerNews,
+  getOptionsActivity,
+  debugRaw,
   isConfigured,
 };

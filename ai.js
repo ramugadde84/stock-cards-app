@@ -45,12 +45,47 @@ function isConfigured() {
  * Builds the prompt. Everything the model sees is passed in explicitly —
  * no hidden state — so the output is reproducible and auditable.
  */
+/** Strips HTML tags from wire copy and caps length for the prompt. */
+function cleanBody(html, maxChars = 6000) {
+  if (!html) return '';
+  return String(html)
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[\s\S]*?<\/style>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|tr|h\d)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#\d+;/g, '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    .slice(0, maxChars);
+}
+
 function buildPrompt(ticker, data) {
   const e = data.earnings;
   const bb = data.bullsBears;
+  const releases = data.newsReleases || [];
 
   const lines = [];
   lines.push(`Ticker: ${ticker}`);
+
+  // The press release is the FASTEST and most complete source — it lands on
+  // Benzinga's wire the moment the company publishes, ahead of aggregators,
+  // and it contains guidance language that structured EPS fields never do.
+  // Put it first so the model weighs it accordingly.
+  if (releases.length) {
+    lines.push('', '=== EARNINGS PRESS RELEASE (Benzinga wire — primary source) ===');
+    releases.slice(0, 2).forEach((r, i) => {
+      lines.push('', `[Release ${i + 1}] ${r.title || ''}`);
+      if (r.created) lines.push(`Published: ${r.created}`);
+      const body = cleanBody(r.body) || cleanBody(r.teaser);
+      if (body) lines.push('', body);
+    });
+  }
 
   if (e) {
     lines.push('', 'REPORTED EARNINGS:');
@@ -78,20 +113,30 @@ ${lines.join('\n')}
 
 Assess what THIS DATA says about the company's reported results. Judge the fundamentals — do not predict the share price, and do not give buy/sell/hold advice.
 
-Weigh the following, in roughly this order of importance:
-1. Did EPS and revenue beat or miss consensus, and by how much?
-2. What do the bull and bear cases identify as the real drivers?
-3. Which side has the stronger evidence in the data provided?
+If a press release is included above, read it carefully and EXTRACT the actual figures — revenue, EPS, margins, and especially any FORWARD GUIDANCE. Populate the "extracted" field with what you find. Only report numbers that literally appear in the text; leave a field null rather than inferring or estimating it. A fabricated figure is far worse than a missing one.
 
-Important: a beat does not reliably mean the stock rises. Guidance, one-off items and expectations already priced in routinely matter more. If the data provided does not let you judge something that matters (e.g. forward guidance is absent), say so in "unknowns" rather than guessing.
+Weigh the following, in roughly this order of importance:
+1. Forward guidance — raised, lowered, or reaffirmed? This routinely moves the stock more than the quarter just reported.
+2. Did EPS and revenue beat or miss consensus, and by how much?
+3. Margin direction and any one-off or non-recurring items.
+4. What do the bull and bear cases identify as the real drivers?
+
+Important: a beat does not reliably mean the stock rises. Expectations already priced in, guidance, and one-off items routinely matter more. If the data does not let you judge something important, say so in "unknowns" rather than guessing.
 
 Respond with ONLY a JSON object, no markdown fences, in exactly this shape:
 {
   "verdict": "Bullish" | "Bearish" | "Mixed" | "Insufficient data",
   "confidence": "high" | "medium" | "low",
   "summary": "two or three sentences on what the results actually show",
-  "bullPoints": ["strongest supporting points, from the data"],
-  "bearPoints": ["strongest opposing points, from the data"],
+  "extracted": {
+    "revenue": "as stated, e.g. '$622.7M, +25% YoY', or null",
+    "eps": "as stated, or null",
+    "epsVsEstimate": "beat/miss and by how much if stated, or null",
+    "guidance": "what guidance was given and whether raised/lowered/reaffirmed, or null",
+    "margins": "margin commentary if stated, or null"
+  },
+  "bullPoints": ["strongest supporting points, quoting figures where given"],
+  "bearPoints": ["strongest opposing points, quoting figures where given"],
   "unknowns": ["what's missing that would change or firm up this read"]
 }`;
 }
@@ -178,10 +223,23 @@ function parseAnalysis(raw) {
   }
 
   const arr = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []);
+  const str = (v) => (typeof v === 'string' && v.trim() && v !== 'null' ? v.trim() : null);
+
+  const ex = parsed.extracted && typeof parsed.extracted === 'object' ? parsed.extracted : {};
+
   return {
     verdict: typeof parsed.verdict === 'string' ? parsed.verdict : 'Insufficient data',
     confidence: typeof parsed.confidence === 'string' ? parsed.confidence : 'low',
     summary: typeof parsed.summary === 'string' ? parsed.summary : '',
+    // Figures read out of the press release. Each is either a string the
+    // model found in the text, or null — never a guess.
+    extracted: {
+      revenue: str(ex.revenue),
+      eps: str(ex.eps),
+      epsVsEstimate: str(ex.epsVsEstimate),
+      guidance: str(ex.guidance),
+      margins: str(ex.margins),
+    },
     bullPoints: arr(parsed.bullPoints),
     bearPoints: arr(parsed.bearPoints),
     unknowns: arr(parsed.unknowns),

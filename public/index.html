@@ -12,7 +12,10 @@
     <nav class="menu">
       <button class="menu-btn active" data-view="search" type="button">🔍 Search Ticker</button>
       <button class="menu-btn" data-view="earnings" type="button">📅 Earnings Calendar</button>
+      <button class="menu-btn" data-view="movers" type="button">🔥 Movers</button>
       <button class="menu-btn" data-view="macro" type="button">📅 Key Dates</button>
+      <button class="menu-btn" data-view="average" type="button">🧮 Average Down</button>
+      <button class="menu-btn" data-view="planner" type="button">🎯 Trade Planner</button>
       <button class="menu-btn" data-view="coupons" type="button">🏷️ Coupons</button>
     </nav>
   </header>
@@ -64,6 +67,59 @@
       <div id="earningsGrid" class="card-grid"></div>
     </section>
 
+    <!-- ==================== MOVERS VIEW ==================== -->
+    <section id="moversView" class="view hidden">
+      <div class="macro-head">
+        <h2 class="section-heading" style="margin:0;padding:0;border:0;">What's moving</h2>
+        <span class="macro-source" id="moversSession">—</span>
+      </div>
+      <p class="section-sub">
+        Scans S&amp;P 500 names and lists <strong>every one that moved at all</strong>,
+        biggest move first. Defaults to <strong>after-hours</strong>, pinned to the
+        post-market tape even at 9am, so last night's earnings reaction doesn't get
+        replaced by the pre-market one. Set a minimum only if the list gets noisy.
+      </p>
+
+      <div class="session-bar">
+        <span class="session-label">Session:</span>
+        <button type="button" class="msession-btn active" data-session="post">🌙 After-hours</button>
+        <button type="button" class="msession-btn" data-session="pre">🌅 Pre-market</button>
+        <button type="button" class="msession-btn" data-session="regular">☀️ Regular</button>
+        <button type="button" class="msession-btn" data-session="auto" title="Follow whichever session Yahoo says is live right now">🕒 Auto</button>
+      </div>
+
+      <div class="session-bar">
+        <span class="session-label">Universe:</span>
+        <button type="button" class="universe-btn active" data-universe="top100">Top 100 (fast)</button>
+        <button type="button" class="universe-btn" data-universe="sp500">Full S&amp;P 500 (slower)</button>
+        <label class="date-label" style="margin-left:8px;">
+          Min move
+          <select id="moversMinMove">
+            <option value="0" selected>Any move (all)</option>
+            <option value="0.5">0.5%</option>
+            <option value="1">1%</option>
+            <option value="2">2%</option>
+            <option value="3">3%</option>
+            <option value="5">5%</option>
+          </select>
+        </label>
+        <button type="button" id="moversScan" style="margin-left:auto;">Scan now</button>
+      </div>
+
+      <p id="moversStatus" class="status"></p>
+
+      <div class="movers-cols">
+        <div>
+          <h3 id="moversUpHead" class="section-heading" style="margin-top:0;padding-top:0;border:0;font-size:14px;">🟢 Up</h3>
+          <div id="moversUp" class="macro-list"></div>
+        </div>
+        <div>
+          <h3 id="moversDownHead" class="section-heading" style="margin-top:0;padding-top:0;border:0;font-size:14px;">🔴 Down</h3>
+          <div id="moversDown" class="macro-list"></div>
+        </div>
+      </div>
+    </section>
+
     <!-- ==================== KEY DATES VIEW ==================== -->
     <section id="macroView" class="view hidden">
       <div class="macro-head">
@@ -82,24 +138,139 @@
       <div id="macroPast" class="macro-list"></div>
     </section>
 
+    <!-- ==================== AVERAGE DOWN VIEW ==================== -->
+    <section id="averageView" class="view hidden">
+      <h2 class="section-heading" style="margin-top:0;padding-top:0;border:0;">Average-down calculator</h2>
+      <p class="section-sub">
+        Work out how many more shares you'd need to buy to bring your average cost
+        down to a target. Everything runs in your browser — nothing is sent anywhere.
+      </p>
+
+      <div class="calc-grid">
+        <div class="calc-field">
+          <label for="avgTicker">Ticker (optional)</label>
+          <input id="avgTicker" type="text" placeholder="SMCI" autocomplete="off" />
+          <button type="button" id="avgFetchPrice" class="ghost-btn">Use live price</button>
+        </div>
+        <div class="calc-field">
+          <label for="avgShares">Shares you own</label>
+          <input id="avgShares" type="number" min="0" step="any" placeholder="25" />
+        </div>
+        <div class="calc-field">
+          <label for="avgCost">Your average cost</label>
+          <input id="avgCost" type="number" min="0" step="any" placeholder="39.69" />
+        </div>
+        <div class="calc-field">
+          <label for="avgPrice">Current price</label>
+          <input id="avgPrice" type="number" min="0" step="any" placeholder="32" />
+        </div>
+        <div class="calc-field">
+          <label for="avgTarget">Target average (optional)</label>
+          <input id="avgTarget" type="number" min="0" step="any" placeholder="35" />
+        </div>
+      </div>
+
+
+      <div id="avgResult" class="calc-result"></div>
+    </section>
+
+    <!-- ==================== TRADE PLANNER VIEW ==================== -->
+    <section id="plannerView" class="view hidden">
+      <h2 class="section-heading" style="margin-top:0;padding-top:0;border:0;">Trade planner — position size</h2>
+      <p class="section-sub">
+        Enter where you'd buy, where you'd take profit, and where you'd cut the loss.
+        Share count is worked out from how much you're willing to lose, which is the
+        part that actually determines a sensible size.
+      </p>
+
+      <div class="calc-grid">
+        <div class="calc-field">
+          <label for="pTicker">Ticker (optional)</label>
+          <input id="pTicker" type="text" placeholder="SMCI" autocomplete="off" />
+          <button type="button" id="pFetchPrice" class="ghost-btn">Use live price</button>
+        </div>
+        <div class="calc-field">
+          <label for="pEntry">Entry price</label>
+          <input id="pEntry" type="number" min="0" step="any" placeholder="20" />
+        </div>
+        <div class="calc-field">
+          <label for="pTargetUp">Upper — take profit</label>
+          <input id="pTargetUp" type="number" min="0" step="any" placeholder="23" />
+        </div>
+        <div class="calc-field">
+          <label for="pStop">Lower — stop loss</label>
+          <input id="pStop" type="number" min="0" step="any" placeholder="18" />
+        </div>
+        <div class="calc-field">
+          <label for="pRisk">Max you'll risk ($)</label>
+          <input id="pRisk" type="number" min="0" step="any" placeholder="100" />
+        </div>
+        <div class="calc-field">
+          <label for="pBudget">Or cap spend at ($)</label>
+          <input id="pBudget" type="number" min="0" step="any" placeholder="optional" />
+        </div>
+      </div>
+
+      <div id="plannerResult" class="calc-result"></div>
+    </section>
+
     <!-- ==================== COUPONS VIEW ==================== -->
     <section id="couponsView" class="view hidden">
       <div class="disclaimer-box">
-        <strong>How this works:</strong> codes come from what merchants publish to
-        affiliate networks (with real start/end dates), not from scraped coupon
-        sites. Nothing here is auto-tested at checkout — there's no legitimate way
-        to do that across arbitrary stores. Published &amp; unexpired ≠ guaranteed to
-        work, since codes can be limited by product, minimum spend, region, or
-        first-time customers. Use <em>My Saved Codes</em> to record what actually
-        happened when you tried one.
+        <strong>How this works:</strong> nothing here is scraped, and nothing is
+        auto-tested at checkout — there's no legitimate way to verify a code
+        works across arbitrary stores. Live lookup (when enabled) shows only what
+        merchants publish to affiliate networks, with real start/end dates; even
+        then, published &amp; unexpired ≠ guaranteed to work, since codes can be
+        limited by product, minimum spend, region, or first-time customers.
+        <em>My Saved Codes</em> is the part that works with no setup — record what
+        actually happened when you tried one.
       </div>
 
-      <form id="couponForm" class="search-form">
-        <input id="storeInput" type="text" placeholder="Store name, e.g. nike" autocomplete="off" />
-        <button type="submit">Look Up</button>
-      </form>
-      <p id="couponStatus" class="status"></p>
-      <div id="couponGrid" class="card-grid"></div>
+      <!-- Hidden unless an affiliate token is configured — a search button
+           that can only ever return "not configured" is worse than no button. -->
+      <div id="couponLookup" class="hidden">
+        <form id="couponForm" class="search-form">
+          <input id="storeInput" type="text" placeholder="Store name, e.g. nike" autocomplete="off" />
+          <button type="submit">Look Up</button>
+        </form>
+        <p id="couponStatus" class="status"></p>
+        <div id="couponGrid" class="card-grid"></div>
+      </div>
+
+      <details id="couponSetup" class="coupon-setup hidden">
+        <summary>Live merchant lookup is off — what it would take to turn on</summary>
+        <p>
+          There is no free public API of working promo codes. The only legitimate
+          source is an affiliate network, where merchants publish their own current
+          offers with real start/end dates. That needs a publisher account:
+        </p>
+        <ol>
+          <li>Register as a publisher with
+            <a href="https://signup.linkshare.com/publishers/registration/landing?ls-locale=us&amp;host=linkshare"
+               target="_blank" rel="noopener noreferrer">Rakuten Advertising</a>.
+            It's a real review — it takes days and can be declined.</li>
+          <li>Apply to each merchant you care about. The feed only ever contains
+            advertisers you have an approved partnership with, so a new account
+            returns nothing even when everything is set up correctly.</li>
+          <li>In the
+            <a href="https://developers.rakutenadvertising.com/" target="_blank"
+               rel="noopener noreferrer">Developer Portal</a> → Account →
+            Applications, create an API credential and copy the
+            <strong>Client ID</strong> and <strong>Client Secret</strong>. Your
+            <strong>SID</strong> is at the top right of the publisher dashboard.</li>
+          <li>Put all three in a <code>.env</code> file next to
+            <code>server.js</code> as <code>COUPON_CLIENT_ID</code>,
+            <code>COUPON_CLIENT_SECRET</code> and <code>COUPON_SCOPE_ID</code>,
+            then restart. The app handles the token exchange and refresh itself.</li>
+        </ol>
+        <p>
+          Worth knowing before you start: even fully configured, this covers only
+          your partnered merchants — not "any store". For everyday shopping a
+          browser extension at checkout will beat it. What this tab is actually
+          good for is the tracker below: your own record of what really worked.
+        </p>
+      </details>
 
       <h2 class="section-heading">My Saved Codes</h2>
       <p class="section-sub">

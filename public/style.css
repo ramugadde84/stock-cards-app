@@ -337,6 +337,140 @@ td:first-child {
 }
 
 /* ---------------------------------------------------------------------- */
+/* Coupons — setup explainer                                               */
+/* ---------------------------------------------------------------------- */
+
+.coupon-setup {
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  background: var(--card-bg);
+  padding: 12px 16px;
+  margin-bottom: 18px;
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.coupon-setup summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.coupon-setup p { margin: 10px 0; }
+.coupon-setup ol { margin: 10px 0 10px 18px; padding: 0; }
+.coupon-setup li { margin-bottom: 7px; }
+.coupon-setup a { color: var(--accent); }
+
+.coupon-setup code {
+  background: rgba(148, 163, 184, .14);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Movers                                                                  */
+/* ---------------------------------------------------------------------- */
+
+.msession-btn,
+.universe-btn {
+  padding: 7px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.msession-btn:hover,
+.universe-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.msession-btn.active,
+.universe-btn.active {
+  background: var(--accent);
+  color: #041014;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+/* Stale rows stay visible but visibly qualified — hiding them would be worse,
+   since last night's after-hours move is often exactly what you're looking for. */
+.mover-item.is-stale { opacity: .78; }
+
+.mover-stale {
+  margin-left: 8px;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 99px;
+  background: rgba(251, 191, 36, .15);
+  color: #fbbf24;
+  white-space: nowrap;
+}
+
+/* Two columns so gainers and losers read side by side rather than as one
+   long list where you lose track of which direction you're looking at. */
+.movers-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-top: 12px;
+}
+
+.mover-item { cursor: pointer; }
+.mover-item:hover { background: rgba(148, 163, 184, .14); }
+
+.mover-tick {
+  font-weight: 700;
+  color: var(--text);
+  min-width: 62px;
+  font-size: 13px;
+}
+
+.mover-chg {
+  font-weight: 700;
+  min-width: 62px;
+  text-align: right;
+  font-size: 13px;
+}
+
+.mover-chg.pos { color: #34d399; }
+.mover-chg.neg { color: #f87171; }
+
+.mover-name {
+  flex: 1;
+  color: var(--muted);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.movers-cols .macro-date { min-width: 0; }
+
+/* With no threshold a full S&P scan can return a couple of hundred rows a
+   side. Scroll each column rather than pushing the page to several screens. */
+.movers-cols .macro-list {
+  max-height: 62vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.mover-sess {
+  display: block;
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: .3px;
+}
+
+@media (max-width: 860px) {
+  .movers-cols { grid-template-columns: 1fr; }
+}
+
+/* ---------------------------------------------------------------------- */
 /* Menu / view switching                                                   */
 /* ---------------------------------------------------------------------- */
 
@@ -972,3 +1106,121 @@ td:first-child {
     align-items: stretch;
   }
 }
+
+.wire-badge {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(56, 189, 248, .18);
+  color: var(--accent);
+  margin-left: 6px;
+  letter-spacing: .04em;
+}
+
+.news-chan {
+  font-size: 10px;
+  color: var(--muted);
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.news-teaser {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.55;
+  margin-top: 4px;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Options flow                                                            */
+/* ---------------------------------------------------------------------- */
+
+.opt-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 6px; border-radius: 6px; font-size: 11px;
+  background: rgba(148,163,184,.06); margin: 3px 0;
+  font-family: ui-monospace, Menlo, monospace;
+}
+.opt-rank { color: var(--muted); min-width: 24px; font-weight: 700; }
+.opt-strike { color: var(--text); font-weight: 700; min-width: 62px; }
+.opt-exp { color: var(--muted); min-width: 78px; }
+.opt-prem { color: var(--accent); font-weight: 700; min-width: 62px; text-align: right; }
+.opt-vol { color: var(--muted); font-size: 10px; }
+
+.sweep-badge {
+  font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 999px;
+  background: rgba(251,191,36,.18); color: #fbbf24; letter-spacing: .03em;
+}
+
+.live-dot { color: var(--positive); font-weight: 700; }
+
+@media (max-width: 480px) { .opt-row { flex-wrap: wrap; } }
+
+/* ---------------------------------------------------------------------- */
+/* Average-down calculator                                                 */
+/* ---------------------------------------------------------------------- */
+
+.calc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.calc-field { display: flex; flex-direction: column; gap: 5px; }
+
+.calc-field label {
+  font-size: 11px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .04em;
+}
+
+.calc-field input {
+  padding: 10px 12px; border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: var(--card-bg); color: var(--text); font-size: 15px;
+}
+
+.calc-field input:focus { outline: 2px solid var(--accent); }
+
+.ghost-btn {
+  margin-top: 4px; padding: 6px 10px; font-size: 11px;
+  border-radius: 6px; border: 1px solid var(--card-border);
+  background: transparent; color: var(--muted); cursor: pointer;
+}
+.ghost-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.calc-result { display: flex; flex-direction: column; gap: 14px; }
+
+.calc-block {
+  background: var(--card-bg); border: 1px solid var(--card-border);
+  border-radius: 12px; padding: 14px 16px; font-size: 12px;
+}
+
+.calc-block.highlight { border-color: var(--accent); background: rgba(56,189,248,.07); }
+
+.calc-block-title {
+  font-size: 11px; font-weight: 700; color: var(--text);
+  text-transform: uppercase; letter-spacing: .04em; margin-bottom: 8px;
+}
+
+.calc-big {
+  font-size: 26px; font-weight: 700; color: var(--accent);
+  margin: 4px 0 10px;
+}
+
+.calc-note {
+  margin-top: 8px; font-size: 11px; color: var(--muted);
+  font-style: italic; line-height: 1.55;
+}
+
+.calc-hint { color: var(--muted); font-size: 13px; }
+
+.calc-warn {
+  background: rgba(251,191,36,.1); border-left: 3px solid #fbbf24;
+  border-radius: 8px; padding: 12px 14px; font-size: 12px;
+  color: var(--muted); line-height: 1.6;
+}
+.calc-warn strong { color: var(--text); }
